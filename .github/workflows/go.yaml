@@ -18,10 +18,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Git Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache: true
@@ -50,7 +50,14 @@ jobs:
       # goreleaser check needs no tag, so a broken release config is caught on
       # every pull request instead of at release time, when the tag is already
       # public and immutable.
+      #
+      # GOTOOLCHAIN=auto for the same reason as in release.yaml: setup-go v6+
+      # exports GOTOOLCHAIN=local, and goreleaser v2.17.1 declares go 1.26.5
+      # against this module's 1.24.1. Scoped to this step so the steps above
+      # stay on the go.mod version.
       - name: goreleaser check
+        env:
+          GOTOOLCHAIN: auto
         run: |
           go install github.com/goreleaser/goreleaser/v2@v2.17.1
           goreleaser check
