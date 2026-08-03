@@ -22,12 +22,12 @@ jobs:
       - name: Git Checkout
         # fetch-depth: 0 is mandatory. The default shallow fetch leaves
         # goreleaser with no tags and no history to build release notes from.
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache: true
@@ -59,7 +59,16 @@ jobs:
       # allowed-actions policy is not readable from here, and a restrictive one
       # would fail at "Prepare all required actions" with an error that reads
       # like a network fault. This also pins the exact goreleaser build.
+      #
+      # GOTOOLCHAIN=auto is load-bearing. setup-go v6+ exports
+      # GOTOOLCHAIN=local, and goreleaser v2.17.1 declares go 1.26.5 while this
+      # module pins 1.24.1 — so under `local` this step fails outright rather
+      # than fetching the newer toolchain to build goreleaser with. That fetch
+      # is what already happens today; this only keeps it. Scoped to this step
+      # so the vet, test, and build steps stay on the go.mod version.
       - name: Install goreleaser
+        env:
+          GOTOOLCHAIN: auto
         run: go install github.com/goreleaser/goreleaser/v2@v2.17.1
 
       - name: goreleaser check
