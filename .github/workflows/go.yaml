@@ -1,0 +1,61 @@
+name: go
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  test:
+    name: Build and test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Git Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: gofmt
+        run: |
+          UNFORMATTED=$(gofmt -l .)
+          if [ -n "$UNFORMATTED" ]; then
+            echo "::error::These files are not gofmt-clean:"
+            echo "$UNFORMATTED"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go build
+        run: go build ./...
+
+      # -race is not optional here: the client paces and retries from shared
+      # state, and a data race there would surface as a wrong rate-limit
+      # decision rather than a crash.
+      - name: go test
+        run: go test -race ./...
+
+      # The generated contract is what agents read. If regenerating changes it,
+      # the committed copy no longer matches internal/errx.
+      - name: Generated contract is current
+        run: |
+          go generate ./...
+          DIRTY=$(git status --porcelain)
+          if [ -n "$DIRTY" ]; then
+            echo "::error::go generate changed tracked files; commit the result:"
+            echo "$DIRTY"
+            git diff
+            exit 1
+          fi
