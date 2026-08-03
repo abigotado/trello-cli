@@ -1,4 +1,4 @@
-module github.com/abigotado-niko/trello-cli
+module github.com/abigotado/trello-cli
 
 go 1.24.1
 

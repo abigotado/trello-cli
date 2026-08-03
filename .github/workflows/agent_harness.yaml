@@ -8,30 +8,9 @@ on:
   push:
     branches:
       - main
-    paths:
-      - ".agents/**"
-      - ".cursor/rules/**"
-      - "AGENTS.md"
-      - "CLAUDE.md"
-      - ".gitignore"
-      - ".github/workflows/agent_harness.yaml"
-      # Generated mirrors are ignored, so these only ever match when someone
-      # force-adds them — the regression the untracked check exists to catch.
-      # Without them such a push would not trigger this workflow at all.
-      - ".claude/**"
-      - ".codex/**"
   pull_request:
     branches:
       - main
-    paths:
-      - ".agents/**"
-      - ".cursor/rules/**"
-      - "AGENTS.md"
-      - "CLAUDE.md"
-      - ".gitignore"
-      - ".github/workflows/agent_harness.yaml"
-      - ".claude/**"
-      - ".codex/**"
 
 jobs:
   harness:

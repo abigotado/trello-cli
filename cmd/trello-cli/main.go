@@ -6,8 +6,8 @@ import (
 	"os"
 	"runtime/debug"
 
-	"github.com/abigotado-niko/trello-cli/internal/cli"
-	"github.com/abigotado-niko/trello-cli/internal/errx"
+	"github.com/abigotado/trello-cli/internal/cli"
+	"github.com/abigotado/trello-cli/internal/errx"
 )
 
 func main() {

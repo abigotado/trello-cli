@@ -15,11 +15,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/abigotado-niko/trello-cli/internal/auth"
-	"github.com/abigotado-niko/trello-cli/internal/config"
-	"github.com/abigotado-niko/trello-cli/internal/errx"
-	"github.com/abigotado-niko/trello-cli/internal/output"
-	"github.com/abigotado-niko/trello-cli/internal/trello"
+	"github.com/abigotado/trello-cli/internal/auth"
+	"github.com/abigotado/trello-cli/internal/config"
+	"github.com/abigotado/trello-cli/internal/errx"
+	"github.com/abigotado/trello-cli/internal/output"
+	"github.com/abigotado/trello-cli/internal/resolve"
+	"github.com/abigotado/trello-cli/internal/trello"
 	"github.com/spf13/cobra"
 )
 
@@ -39,6 +40,10 @@ type App struct {
 	out    *output.Writer
 	log    *slog.Logger
 	client *trello.Client
+	res    *resolve.Resolver
+	// token is kept only to key the resolver's on-disk index. It is never
+	// logged, rendered, or written anywhere but that hash.
+	token string
 
 	// Resolved persistent flags.
 	format    string
@@ -48,6 +53,8 @@ type App struct {
 	timeout   time.Duration
 	verbose   bool
 	jsonAlias bool
+	fuzzy     bool
+	noCache   bool
 
 	// cancels holds the context cancels to run when Execute returns. Kept on
 	// the App rather than at package scope so two Apps in one test process
@@ -101,6 +108,8 @@ func (a *App) NewRootCommand() *cobra.Command {
 	flags.BoolVar(&a.assumeYes, "yes", false, "confirm a destructive operation")
 	flags.DurationVar(&a.timeout, "timeout", 0, "abort the command after this duration (default 30s)")
 	flags.BoolVarP(&a.verbose, "verbose", "v", false, "log request activity to stderr")
+	flags.BoolVar(&a.fuzzy, "fuzzy", false, "allow substring name matching (off by default: it fails by confidently picking the wrong object)")
+	flags.BoolVar(&a.noCache, "no-cache", false, "bypass the local name-resolution index")
 	// Retained so existing callers keep working after the move to -o.
 	flags.BoolVar(&a.jsonAlias, "json", false, "alias for --output json")
 	_ = flags.MarkHidden("json")
@@ -118,6 +127,7 @@ func (a *App) NewRootCommand() *cobra.Command {
 		a.newMeCommand(),
 		a.newAuthCommand(),
 	)
+	root.AddCommand(a.readCommands()...)
 	return root
 }
 
@@ -169,6 +179,7 @@ func (a *App) trelloClient(ctx context.Context) (*trello.Client, error) {
 	if err != nil {
 		return nil, err
 	}
+	a.token = creds.Token
 	a.client = trello.New(
 		a.cfg.BaseURL,
 		trello.Credentials{APIKey: creds.APIKey, Token: creds.Token},

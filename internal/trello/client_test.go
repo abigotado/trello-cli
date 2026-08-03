@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/abigotado-niko/trello-cli/internal/errx"
+	"github.com/abigotado/trello-cli/internal/errx"
 )
 
 // newTestClient builds a client against srv that records sleeps instead of

@@ -19,7 +19,7 @@ import (
 	"reflect"
 	"strings"
 
-	"github.com/abigotado-niko/trello-cli/internal/errx"
+	"github.com/abigotado/trello-cli/internal/errx"
 )
 
 // Format selects how results are rendered.
@@ -231,15 +231,21 @@ func selectFields(available []Field, want []string) ([]Field, error) {
 	return selected, nil
 }
 
-// project applies the --fields allowlist. Without it, values are marshaled as
-// their own types so the default field set is whatever the type declares.
+// project renders data through its declared field set.
+//
+// Renderable values always go through Fields(), with or without --fields.
+// Marshaling the struct directly when no projection was requested would give
+// one command two different JSON shapes — different key names, and fields the
+// view computes (a card's list name) missing entirely from the default output.
+// A caller cannot write one parser against that.
 func (w *Writer) project(data any) (any, error) {
-	if len(w.Fields) == 0 {
-		return data, nil
-	}
 	rows, collection, ok := asRows(data)
 	if !ok {
-		return nil, errx.Usage("--fields is not supported for this command")
+		if len(w.Fields) > 0 {
+			return nil, errx.Usage("--fields is not supported for this command")
+		}
+		// Not a Renderable: marshal whatever it is, as the contract dump does.
+		return data, nil
 	}
 	projected := make([]map[string]any, 0, len(rows))
 	for _, row := range rows {

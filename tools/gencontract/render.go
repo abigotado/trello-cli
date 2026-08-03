@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/abigotado-niko/trello-cli/internal/errx"
+	"github.com/abigotado/trello-cli/internal/errx"
 )
 
 // generatedNotice marks the output as machine-produced. It matches the

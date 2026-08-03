@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-const module = "github.com/abigotado-niko/trello-cli"
+const module = "github.com/abigotado/trello-cli"
 
 // deps returns every package pkg depends on, transitively.
 func deps(t *testing.T, pkg string) []string {

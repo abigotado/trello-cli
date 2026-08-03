@@ -1,0 +1,27 @@
+version: 2
+
+updates:
+  # Go modules. The dependency surface is deliberately tiny — cobra and
+  # go-keyring — so grouping everything into one PR keeps the noise near zero
+  # while still surfacing an update promptly.
+  - package-ecosystem: gomod
+    directory: "/"
+    schedule:
+      interval: weekly
+    groups:
+      go-dependencies:
+        patterns: ["*"]
+    commit-message:
+      prefix: "deps"
+
+  # Actions are pinned by major tag, so this catches the security-relevant
+  # moves that a floating tag would otherwise hide.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: "ci"

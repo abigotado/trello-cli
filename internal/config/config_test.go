@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/abigotado-niko/trello-cli/internal/errx"
+	"github.com/abigotado/trello-cli/internal/errx"
 )
 
 func env(pairs map[string]string) func(string) (string, bool) {

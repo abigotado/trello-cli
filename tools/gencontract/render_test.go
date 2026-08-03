@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/abigotado-niko/trello-cli/internal/errx"
+	"github.com/abigotado/trello-cli/internal/errx"
 )
 
 // The generated files are the copies an agent actually reads. If regenerating

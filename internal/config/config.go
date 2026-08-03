@@ -10,7 +10,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/abigotado-niko/trello-cli/internal/errx"
+	"github.com/abigotado/trello-cli/internal/errx"
 )
 
 // DefaultBaseURL is the Trello REST root.

@@ -5,8 +5,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/abigotado-niko/trello-cli/internal/auth"
-	"github.com/abigotado-niko/trello-cli/internal/errx"
+	"github.com/abigotado/trello-cli/internal/auth"
+	"github.com/abigotado/trello-cli/internal/errx"
 	"github.com/spf13/cobra"
 )
 

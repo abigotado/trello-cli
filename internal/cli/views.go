@@ -1,9 +1,9 @@
 package cli
 
 import (
-	"github.com/abigotado-niko/trello-cli/internal/auth"
-	"github.com/abigotado-niko/trello-cli/internal/output"
-	"github.com/abigotado-niko/trello-cli/internal/trello"
+	"github.com/abigotado/trello-cli/internal/auth"
+	"github.com/abigotado/trello-cli/internal/output"
+	"github.com/abigotado/trello-cli/internal/trello"
 )
 
 // Views adapt domain types to output.Renderable.

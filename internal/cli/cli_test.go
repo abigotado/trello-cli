@@ -10,8 +10,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/abigotado-niko/trello-cli/internal/auth"
-	"github.com/abigotado-niko/trello-cli/internal/errx"
+	"github.com/abigotado/trello-cli/internal/auth"
+	"github.com/abigotado/trello-cli/internal/errx"
 	"github.com/spf13/cobra"
 )
 
@@ -413,5 +413,191 @@ func TestRateLimitReachesTheCallerWithRetryAfter(t *testing.T) {
 	}
 	if env.Error.RetryAfter == "" {
 		t.Error("retry_after is empty; the caller has nothing to back off by")
+	}
+}
+
+// trelloStub serves the handful of endpoints the read commands use, so the
+// resolver is exercised end to end without a network.
+func trelloStub(t *testing.T) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/members/me/boards", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`[
+			{"id":"000000000000000000000001","name":"Roadmap","shortLink":"aaaaaaaa"},
+			{"id":"000000000000000000000002","name":"Roadmap 2026","shortLink":"bbbbbbbb"},
+			{"id":"000000000000000000000003","name":"Personal","shortLink":"cccccccc"}]`))
+	})
+	mux.HandleFunc("/boards/000000000000000000000001/lists", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`[{"id":"000000000000000000000010","name":"Doing"},{"id":"000000000000000000000011","name":"Done"}]`))
+	})
+	mux.HandleFunc("/boards/000000000000000000000001/cards", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`[{"id":"000000000000000000000020","name":"Ship it","shortLink":"dddddddd","idList":"000000000000000000000010"}]`))
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func readHarness(t *testing.T, srv *httptest.Server) *harness {
+	t.Helper()
+	// XDG_CACHE_HOME and HOME are redirected so the resolver's index never
+	// lands in the developer's real cache directory.
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(dir, "xdg"))
+	return newHarness(t, map[string]string{
+		auth.EnvAPIKey:        "k",
+		auth.EnvToken:         "t",
+		"TRELLO_CLI_BASE_URL": srv.URL,
+	}, nil)
+}
+
+func TestNameResolutionThroughCommands(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want errx.Code
+	}{
+		{"exact board name resolves", []string{"lists", "list", "--board", "Roadmap"}, errx.CodeOK},
+		{"board id resolves", []string{"lists", "list", "--board", "000000000000000000000001"}, errx.CodeOK},
+		{"explicit board id flag resolves", []string{"lists", "list", "--board-id", "000000000000000000000001"}, errx.CodeOK},
+		// Eight alphanumerics is also an ordinary name, so a shortLink is
+		// matched against the index rather than short-circuited on its shape.
+		{"short link resolves", []string{"lists", "list", "--board", "aaaaaaaa"}, errx.CodeOK},
+		{"ambiguous prefix exits 4", []string{"lists", "list", "--board", "Road"}, errx.CodeAmbiguous},
+		{"unknown board exits 3", []string{"lists", "list", "--board", "Nope"}, errx.CodeNotFound},
+		{"missing board is a usage error", []string{"lists", "list"}, errx.CodeUsage},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := readHarness(t, trelloStub(t))
+			if got := h.run(tt.args...); got != tt.want {
+				t.Errorf("exit code = %d, want %d\nstdout: %s\nstderr: %s", got, tt.want, h.out(), h.err())
+			}
+		})
+	}
+}
+
+// Exit 4 is only useful if the caller can act on it in one more call, which
+// means the candidates have to be in the envelope.
+func TestAmbiguousBoardEnvelopeCarriesCandidates(t *testing.T) {
+	h := readHarness(t, trelloStub(t))
+	if got := h.run("lists", "list", "--board", "Road"); got != errx.CodeAmbiguous {
+		t.Fatalf("exit code = %d, want %d", got, errx.CodeAmbiguous)
+	}
+	var env struct {
+		Error struct {
+			Code       string `json:"code"`
+			Candidates []struct {
+				ID   string `json:"id"`
+				Name string `json:"name"`
+			} `json:"candidates"`
+		} `json:"error"`
+		Hint string `json:"hint"`
+	}
+	if err := json.Unmarshal([]byte(h.out()), &env); err != nil {
+		t.Fatalf("bad envelope: %v\n%s", err, h.out())
+	}
+	if env.Error.Code != "AMBIGUOUS_BOARD" {
+		t.Errorf("error.code = %q", env.Error.Code)
+	}
+	if len(env.Error.Candidates) != 2 {
+		t.Fatalf("candidates = %d, want 2", len(env.Error.Candidates))
+	}
+	for _, c := range env.Error.Candidates {
+		if c.ID == "" || c.Name == "" {
+			t.Errorf("candidate is missing data: %+v", c)
+		}
+	}
+	if env.Hint == "" {
+		t.Error("no hint telling the caller how to disambiguate")
+	}
+}
+
+func TestUnknownBoardEnvelopeCarriesSuggestions(t *testing.T) {
+	h := readHarness(t, trelloStub(t))
+	if got := h.run("lists", "list", "--board", "Rodmap"); got != errx.CodeNotFound {
+		t.Fatalf("exit code = %d, want %d\n%s", got, errx.CodeNotFound, h.out())
+	}
+	var env struct {
+		Error struct {
+			Code       string `json:"code"`
+			DidYouMean []struct {
+				Name string `json:"name"`
+			} `json:"did_you_mean"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(h.out()), &env); err != nil {
+		t.Fatalf("bad envelope: %v\n%s", err, h.out())
+	}
+	if len(env.Error.DidYouMean) == 0 {
+		t.Fatal("a one-character typo produced no suggestions")
+	}
+	if env.Error.DidYouMean[0].Name != "Roadmap" {
+		t.Errorf("closest suggestion = %q", env.Error.DidYouMean[0].Name)
+	}
+}
+
+// A listing is a collection, so it must carry meta the caller can count on.
+func TestListingsCarryMeta(t *testing.T) {
+	h := readHarness(t, trelloStub(t))
+	if got := h.run("boards", "list"); got != errx.CodeOK {
+		t.Fatalf("exit code = %d, want 0\n%s", got, h.err())
+	}
+	var env struct {
+		Data []map[string]any `json:"data"`
+		Meta *struct {
+			Count int `json:"count"`
+		} `json:"meta"`
+	}
+	if err := json.Unmarshal([]byte(h.out()), &env); err != nil {
+		t.Fatalf("bad envelope: %v\n%s", err, h.out())
+	}
+	if env.Meta == nil {
+		t.Fatal("a collection has no meta")
+	}
+	if env.Meta.Count != 3 || len(env.Data) != 3 {
+		t.Errorf("count = %v, rows = %d, want 3 and 3", env.Meta, len(env.Data))
+	}
+}
+
+// A card listing labels each card with its list name, so reading it does not
+// force the caller into a second lookup.
+func TestCardListingLabelsTheListName(t *testing.T) {
+	h := readHarness(t, trelloStub(t))
+	if got := h.run("cards", "list", "--board", "Roadmap"); got != errx.CodeOK {
+		t.Fatalf("exit code = %d, want 0\nstderr: %s", got, h.err())
+	}
+	var env struct {
+		Data []struct {
+			Name string `json:"name"`
+			List string `json:"list"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(h.out()), &env); err != nil {
+		t.Fatalf("bad envelope: %v\n%s", err, h.out())
+	}
+	if len(env.Data) != 1 || env.Data[0].List != "Doing" {
+		t.Errorf("data = %+v, want the card labelled with list Doing", env.Data)
+	}
+}
+
+// --fields must project the read commands too, since that is where output size
+// actually matters.
+func TestFieldsProjectionOnAListing(t *testing.T) {
+	h := readHarness(t, trelloStub(t))
+	if got := h.run("boards", "list", "--fields", "id,name"); got != errx.CodeOK {
+		t.Fatalf("exit code = %d, want 0\n%s", got, h.err())
+	}
+	var env struct {
+		Data []map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(h.out()), &env); err != nil {
+		t.Fatalf("bad envelope: %v\n%s", err, h.out())
+	}
+	for _, row := range env.Data {
+		if len(row) != 2 {
+			t.Errorf("row has %d keys, want 2: %v", len(row), row)
+		}
 	}
 }

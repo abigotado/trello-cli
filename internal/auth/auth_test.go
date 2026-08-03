@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/abigotado-niko/trello-cli/internal/errx"
+	"github.com/abigotado/trello-cli/internal/errx"
 	"github.com/zalando/go-keyring"
 )
 

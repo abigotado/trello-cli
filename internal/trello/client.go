@@ -24,7 +24,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/abigotado-niko/trello-cli/internal/errx"
+	"github.com/abigotado/trello-cli/internal/errx"
 )
 
 // maxAttempts bounds how many times one request is sent.

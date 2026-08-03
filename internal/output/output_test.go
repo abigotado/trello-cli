@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/abigotado-niko/trello-cli/internal/errx"
+	"github.com/abigotado/trello-cli/internal/errx"
 )
 
 type card struct {
@@ -432,5 +432,59 @@ func TestProjectionPreservesObjectVersusArrayShape(t *testing.T) {
 	}
 	if !strings.HasPrefix(strings.TrimSpace(string(env.Data)), "[") {
 		t.Errorf("a projected collection must stay an array, got %s", env.Data)
+	}
+}
+
+// One command must produce one JSON shape. Marshaling the struct directly when
+// no projection was requested gave different key names and dropped fields the
+// view computes, so --fields silently changed the schema rather than narrowing
+// it.
+func TestJSONShapeIsTheDeclaredFieldSetWithOrWithoutProjection(t *testing.T) {
+	full, out, _ := newWriter(FormatJSON, nil)
+	if err := full.Success(card{id: "1", name: "A", open: true}); err != nil {
+		t.Fatalf("Success() error = %v", err)
+	}
+	var unprojected struct {
+		Data map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &unprojected); err != nil {
+		t.Fatalf("bad JSON: %v\n%s", err, out.String())
+	}
+
+	want := []string{"id", "name", "due", "open"}
+	if len(unprojected.Data) != len(want) {
+		t.Errorf("default output has %d keys, want %d: %v", len(unprojected.Data), len(want), unprojected.Data)
+	}
+	for _, name := range want {
+		if _, ok := unprojected.Data[name]; !ok {
+			t.Errorf("default output is missing declared field %q: %v", name, unprojected.Data)
+		}
+	}
+	// Raw types survive, so a boolean is a boolean in both modes.
+	if unprojected.Data["open"] != true {
+		t.Errorf("open = %v (%T), want boolean true", unprojected.Data["open"], unprojected.Data["open"])
+	}
+
+	narrowed, out2, _ := newWriter(FormatJSON, []string{"id", "open"})
+	if err := narrowed.Success(card{id: "1", name: "A", open: true}); err != nil {
+		t.Fatalf("Success() error = %v", err)
+	}
+	var projected struct {
+		Data map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(out2.Bytes(), &projected); err != nil {
+		t.Fatalf("bad JSON: %v", err)
+	}
+	// Projection must be a strict subset of the default shape, never a
+	// different vocabulary.
+	for name, v := range projected.Data {
+		full, ok := unprojected.Data[name]
+		if !ok {
+			t.Errorf("--fields produced key %q that the default output does not have", name)
+			continue
+		}
+		if full != v {
+			t.Errorf("key %q = %v projected but %v by default", name, v, full)
+		}
 	}
 }

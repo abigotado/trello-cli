@@ -2,7 +2,7 @@ package errx
 
 // docs/contract.md and the shipped skill reference are produced from the table
 // below, so a code cannot be renumbered here and left stale elsewhere.
-//go:generate go run github.com/abigotado-niko/trello-cli/tools/gencontract
+//go:generate go run github.com/abigotado/trello-cli/tools/gencontract
 
 // EnvelopeVersion is the `v` field of every response envelope.
 //
