@@ -81,7 +81,7 @@ List the stored accounts
 
 ### `trello-cli auth login`  **W**
 
-Store an API key and token for an account
+Store an API key and token for an account, from flags or stdin
 
 Requires: `--api-key`, `--token`
 

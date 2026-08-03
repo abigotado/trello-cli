@@ -1,8 +1,11 @@
 package cli
 
 import (
+	"bufio"
 	"context"
 	"errors"
+	"os"
+	"strings"
 
 	"github.com/abigotado/trello-cli/internal/auth"
 	"github.com/abigotado/trello-cli/internal/errx"
@@ -92,13 +95,21 @@ func (a *App) newAuthLoginCommand() *cobra.Command {
 	var apiKey, token string
 	cmd := &cobra.Command{
 		Use:   "login",
-		Short: "Store an API key and token for an account",
+		Short: "Store an API key and token for an account, from flags or stdin",
 		Long: "Store credentials for an account in the OS keychain.\n\n" +
 			"Get an API key at https://trello.com/power-ups/admin and a token by\n" +
 			"authorizing it. Use --account to name the account; without one it is\n" +
 			"stored as \"default\". TRELLO_API_KEY and TRELLO_TOKEN still take precedence\n" +
 			"over anything stored here, which is the right choice for CI and headless\n" +
-			"agents.",
+			"agents.\n\n" +
+			"Prefer stdin to the flags. A credential passed as --token is visible in\n" +
+			"the shell history and, while the process runs, to anyone who can read\n" +
+			"'ps' as you. With neither flag given, this reads two lines from stdin:\n" +
+			"the API key, then the token. Let the shell keep them off the screen:\n\n" +
+			"  read -rs 'key?API key: '; echo\n" +
+			"  read -rs 'tok?Token: '; echo\n" +
+			"  printf '%s\\n%s\\n' \"$key\" \"$tok\" | trello-cli auth login --account work\n" +
+			"  unset key tok",
 		// Not cobra.NoArgs: its message embeds the offending argument, and a
 		// positional is exactly what someone reaches for first on a login
 		// command. `auth login MY-TOKEN` would then echo the credential into
@@ -119,8 +130,17 @@ func (a *App) newAuthLoginCommand() *cobra.Command {
 		if len(args) > 0 {
 			return errx.Usage("auth login takes no positional arguments; pass credentials with --api-key and --token")
 		}
-		if apiKey == "" || token == "" {
-			return errx.Usage("both --api-key and --token are required")
+		switch {
+		case apiKey == "" && token == "":
+			// Both absent is the stdin path. Partially absent is not: mixing
+			// one flag with one piped line is where a mistake would put the
+			// wrong secret in the wrong field, silently.
+			var err error
+			if apiKey, token, err = readCredentials(a.stdin); err != nil {
+				return err
+			}
+		case apiKey == "" || token == "":
+			return errx.Usage("pass both --api-key and --token, or neither and supply them on stdin")
 		}
 		name, err := a.targetAccount()
 		if err != nil {
@@ -276,4 +296,48 @@ func (a *App) newAuthLogoutCommand() *cobra.Command {
 		}
 		return a.out.Success(accountView{Account: name, Source: auth.SourceNone})
 	})
+}
+
+// readCredentials takes the API key and the token from stdin, in that order,
+// one per line.
+//
+// Passing a credential as a flag puts it in the shell history and, for as long
+// as the process lives, in the argv that `ps` prints for anyone running as the
+// same user — verified, not assumed. stdin has neither problem.
+//
+// Echo is deliberately left to the shell rather than handled here. `read -rs`
+// already does it on every platform this ships to, and doing it in Go would
+// mean a terminal dependency for a job the caller's shell does better.
+func readCredentials(stdin *os.File) (string, string, error) {
+	if stdin == nil {
+		return "", "", errx.Usage("no stdin to read credentials from")
+	}
+	// A terminal here means the caller typed `auth login` bare and is now
+	// staring at a cursor with no prompt, wondering if it hung. Say what to do
+	// instead of silently blocking on a read.
+	if info, err := stdin.Stat(); err == nil && info.Mode()&os.ModeCharDevice != 0 {
+		return "", "", &errx.Error{
+			Code:    errx.CodeUsage,
+			Reason:  "USAGE",
+			Message: "no credentials given and stdin is a terminal",
+			Hint:    "pipe the key and the token as two lines, or pass --api-key and --token; see 'trello-cli auth login --help'",
+		}
+	}
+
+	scanner := bufio.NewScanner(stdin)
+	// A Trello token is 64 hex characters and a key is 32, so the default 64KB
+	// buffer is ample; a line longer than that is not a credential.
+	fields := make([]string, 0, 2)
+	for len(fields) < 2 && scanner.Scan() {
+		fields = append(fields, strings.TrimSpace(scanner.Text()))
+	}
+	if err := scanner.Err(); err != nil {
+		return "", "", errx.Usage("read credentials from stdin: %v", err)
+	}
+	if len(fields) < 2 || fields[0] == "" || fields[1] == "" {
+		// Deliberately does not echo what was read: the first line is very
+		// likely to be a real key even when the second is missing.
+		return "", "", errx.Usage("stdin must hold two non-empty lines: the API key, then the token")
+	}
+	return fields[0], fields[1], nil
 }

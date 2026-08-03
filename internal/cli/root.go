@@ -100,6 +100,9 @@ type App struct {
 	store     auth.Store
 	stdout    *os.File
 	stderr    *os.File
+	// stdin carries credentials for `auth login`, so that a token never has to
+	// travel through argv where ps can read it.
+	stdin *os.File
 }
 
 // NewApp builds an App with production defaults.
@@ -110,6 +113,7 @@ func NewApp() *App {
 		registry:  auth.NewRegistry(),
 		stdout:    os.Stdout,
 		stderr:    os.Stderr,
+		stdin:     os.Stdin,
 	}
 }
 

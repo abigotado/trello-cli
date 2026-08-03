@@ -1519,3 +1519,104 @@ func TestNoCommandExitsZeroWithoutAnEnvelope(t *testing.T) {
 		})
 	}
 }
+
+// A credential passed as --token is in the shell history and, while the
+// process runs, in the argv that ps prints for anyone running as the same
+// user. stdin has neither problem, so it is the path that has to work.
+func TestAuthLoginReadsCredentialsFromStdin(t *testing.T) {
+	tests := []struct {
+		name     string
+		stdin    string
+		args     []string
+		wantCode errx.Code
+		wantKey  string
+		wantTok  string
+	}{
+		{
+			name:    "two lines are the key then the token",
+			stdin:   "KEYVALUE\nTOKENVALUE\n",
+			args:    []string{"auth", "login"},
+			wantKey: "KEYVALUE", wantTok: "TOKENVALUE",
+		},
+		{
+			name:    "surrounding whitespace is trimmed",
+			stdin:   "  KEYVALUE  \n\tTOKENVALUE\t\n",
+			args:    []string{"auth", "login"},
+			wantKey: "KEYVALUE", wantTok: "TOKENVALUE",
+		},
+		{
+			name:    "trailing lines are ignored",
+			stdin:   "KEYVALUE\nTOKENVALUE\nignored\n",
+			args:    []string{"auth", "login"},
+			wantKey: "KEYVALUE", wantTok: "TOKENVALUE",
+		},
+		{
+			name:     "one line is not enough",
+			stdin:    "KEYVALUE\n",
+			args:     []string{"auth", "login"},
+			wantCode: errx.CodeUsage,
+		},
+		{
+			name:     "an empty second line is not a token",
+			stdin:    "KEYVALUE\n\n",
+			args:     []string{"auth", "login"},
+			wantCode: errx.CodeUsage,
+		},
+		{
+			// Mixing one flag with one piped line is where a mistake would put
+			// the wrong secret in the wrong field without saying so.
+			name:     "one flag and stdin is refused rather than combined",
+			stdin:    "TOKENVALUE\n",
+			args:     []string{"auth", "login", "--api-key", "KEYVALUE"},
+			wantCode: errx.CodeUsage,
+		},
+		{
+			name:    "flags still work",
+			args:    []string{"auth", "login", "--api-key", "KEYVALUE", "--token", "TOKENVALUE"},
+			wantKey: "KEYVALUE", wantTok: "TOKENVALUE",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := &fakeStore{}
+			h := newHarness(t, nil, store)
+			h.app.stdin = stdinFile(t, tt.stdin)
+
+			got := h.run(tt.args...)
+			if tt.wantCode != errx.CodeOK {
+				if got != tt.wantCode {
+					t.Fatalf("exit code = %d, want %d (stdout: %.200s)", got, tt.wantCode, h.out())
+				}
+				if strings.Contains(h.out(), "TOKENVALUE") {
+					t.Error("the error envelope echoed the token")
+				}
+				return
+			}
+			if got != errx.CodeOK {
+				t.Fatalf("exit code = %d, want 0 (stdout: %.200s)", got, h.out())
+			}
+			if store.saved.APIKey != tt.wantKey || store.saved.Token != tt.wantTok {
+				t.Errorf("stored %q/%q, want %q/%q", store.saved.APIKey, store.saved.Token, tt.wantKey, tt.wantTok)
+			}
+			if strings.Contains(h.out(), tt.wantTok) {
+				t.Error("the success envelope echoed the token")
+			}
+		})
+	}
+}
+
+// stdinFile makes a real *os.File, because the command checks whether stdin is
+// a terminal before reading it.
+func stdinFile(t *testing.T, content string) *os.File {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "stdin")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write stdin: %v", err)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("open stdin: %v", err)
+	}
+	t.Cleanup(func() { f.Close() })
+	return f
+}
