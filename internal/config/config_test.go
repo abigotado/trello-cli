@@ -1,6 +1,7 @@
 package config
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -84,20 +85,45 @@ func TestLoadRejectsBadValues(t *testing.T) {
 // unrecognized value must not silently leave mutations enabled.
 func TestReadOnlyParsing(t *testing.T) {
 	tests := []struct {
-		value string
-		want  bool
+		value   string
+		want    bool
+		wantErr bool
 	}{
-		{"1", true},
-		{"true", true},
-		{"yes", true},
-		{"anything", true},
-		{"0", false},
-		{"false", false},
-		{"", false},
+		{value: "1", want: true},
+		{value: "true", want: true},
+		{value: "TRUE", want: true},
+		{value: "yes", want: true},
+		{value: "on", want: true},
+		{value: "0"},
+		{value: "false"},
+		{value: "no"},
+		// "off" used to enable the lock, because the old rule was "anything
+		// that is not 0, false or empty means on". A lock whose disengage
+		// spelling engages it is the one outcome nobody can guess at.
+		{value: "off"},
+		{value: ""},
+		{value: "  yes  ", want: true},
+		// Anything unrecognised is refused rather than resolved in either
+		// direction: guessing "on" strands a user who meant to unlock, and
+		// guessing "off" writes to a board that was meant to be frozen.
+		{value: "anything", wantErr: true},
+		{value: "maybe", wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run("value="+tt.value, func(t *testing.T) {
 			cfg, err := Load(env(map[string]string{"TRELLO_CLI_READONLY": tt.value}))
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("Load() accepted %q, want a usage error", tt.value)
+				}
+				if code := errx.ExitCode(err); code != errx.CodeUsage {
+					t.Errorf("exit code = %d, want %d", code, errx.CodeUsage)
+				}
+				if !strings.Contains(err.Error(), tt.value) {
+					t.Errorf("error %q does not name the offending value", err)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatalf("Load() error = %v", err)
 			}

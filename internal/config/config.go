@@ -8,6 +8,7 @@ package config
 import (
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/abigotado/trello-cli/internal/errx"
@@ -81,11 +82,36 @@ func Load(lookup func(string) (string, bool)) (Config, error) {
 	if v, ok := lookup("TRELLO_CLI_LIST"); ok {
 		cfg.DefaultList = v
 	}
-	// Any non-empty value enables read-only mode. A user reaching for this is
-	// trying to lock the tool down, so an unrecognized value must not silently
-	// leave mutations enabled.
-	if v, ok := lookup("TRELLO_CLI_READONLY"); ok && v != "" && v != "0" && v != "false" {
-		cfg.ReadOnly = true
+	if v, ok := lookup("TRELLO_CLI_READONLY"); ok {
+		on, err := readOnlyFlag(v)
+		if err != nil {
+			return Config{}, err
+		}
+		cfg.ReadOnly = on
 	}
 	return cfg, nil
+}
+
+// readOnlyFlag interprets TRELLO_CLI_READONLY.
+//
+// The previous rule was "anything except 0, false or empty means on". That is
+// safe in the sense that a typo locks rather than unlocks, but it made
+// TRELLO_CLI_READONLY=off enable read-only mode — the opposite of what anyone
+// typing it intends, and a value the tool would then report as "is set". A
+// lock whose disengage spelling silently engages it is worse than one that
+// refuses to start.
+//
+// So both directions are spelled out and anything else is an error. This is
+// the same rule the resolver follows for names: when the input is ambiguous,
+// say so rather than pick.
+func readOnlyFlag(v string) (bool, error) {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "", "0", "f", "false", "n", "no", "off":
+		return false, nil
+	case "1", "t", "true", "y", "yes", "on":
+		return true, nil
+	default:
+		return false, errx.Usage(
+			"TRELLO_CLI_READONLY=%q is not a yes or no value: use 1/true/yes/on, or 0/false/no/off", v)
+	}
 }

@@ -268,11 +268,17 @@ func (a *App) newCommand(cmd *cobra.Command, run func(context.Context, *cobra.Co
 	cmd.RunE = func(c *cobra.Command, args []string) error {
 		if a.isMutating(c) {
 			if a.cfg.ReadOnly {
+				// The hint deliberately does not say "unset it". Every hint is
+				// written as the caller's next action, and the shipped skill
+				// tells an agent that the hint wins when it disagrees with the
+				// skill — so a hint naming the unset would instruct an agent to
+				// remove the lock its user had just put on, and the skill's own
+				// "never unset it" rule would lose the tie it created.
 				return &errx.Error{
 					Code:    errx.CodeUsage,
 					Reason:  "READ_ONLY",
 					Message: "TRELLO_CLI_READONLY is set, so mutating commands are disabled",
-					Hint:    "unset TRELLO_CLI_READONLY to allow changes",
+					Hint:    "report this and stop; only whoever set TRELLO_CLI_READONLY should clear it",
 				}
 			}
 			if a.isDestructive(c) && !a.assumeYes && !a.dryRun {

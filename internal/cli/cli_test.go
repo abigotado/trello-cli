@@ -1346,15 +1346,6 @@ func TestVersionNeedsNoCredentials(t *testing.T) {
 // requirement from the binary's own behaviour means a newly enforced flag
 // fails the build until it is annotated, and therefore documented.
 func TestEnforcedFlagsAreDerivedFromBehaviourNotAList(t *testing.T) {
-	// Nothing is exempt. Board and list are satisfiable from the environment
-	// (TRELLO_CLI_BOARD, TRELLO_CLI_LIST), but "you can set an environment
-	// variable instead" is not the same as "you can leave it out": a reference
-	// section with no Requires line reads as a command with no requirements.
-	// The legend explains the environment escape once, so the annotation can
-	// stay honest here.
-	flagRef := regexp.MustCompile(`--([a-z][a-z-]*)`)
-	const placeholderID = "5f2b1c9e4a1d2b3c4d5e6f70"
-
 	var leaves []*cobra.Command
 	var walk func(*cobra.Command)
 	walk = func(c *cobra.Command) {
@@ -1371,51 +1362,25 @@ func TestEnforcedFlagsAreDerivedFromBehaviourNotAList(t *testing.T) {
 		path := leaf.CommandPath()
 		t.Run(path, func(t *testing.T) {
 			base := strings.Fields(strings.TrimPrefix(path, "trello-cli "))
-			extra := []string{}
-			enforced := []string{}
+			enforced := map[string]bool{}
 
-			// One requirement hides behind another: lists archive reports the
-			// missing board first and only asks for the list once it has one.
-			// Satisfying each in turn walks the whole chain instead of
-			// stopping at the first rung.
-			for range 8 {
-				h := newHarness(t, map[string]string{
-					"TRELLO_API_KEY":      "k",
-					"TRELLO_TOKEN":        "t",
-					"TRELLO_CLI_BASE_URL": "http://127.0.0.1:9",
-					"TRELLO_CLI_TIMEOUT":  "1s",
-				}, nil)
-				if h.run(append(append([]string{}, base...), extra...)...) != errx.CodeUsage {
-					break
-				}
-				var envelope struct {
-					Error struct{ Message string } `json:"error"`
-				}
-				if err := json.Unmarshal([]byte(h.out()), &envelope); err != nil {
-					t.Fatalf("decode envelope: %v", err)
-				}
-				if !strings.Contains(envelope.Error.Message, "is required") {
-					break
-				}
-				match := flagRef.FindStringSubmatch(envelope.Error.Message)
-				if match == nil {
-					break
-				}
-				// --card and --card-id are one requirement; the reference
-				// documents the name form and says so in its legend. Only
-				// collapse when the name form is a real flag: --item-id and
-				// --checklist-id have no twin and are named in full.
-				name := match[1]
-				if base := strings.TrimSuffix(name, "-id"); leaf.Flags().Lookup(base) != nil {
-					name = base
-				}
-				enforced = append(enforced, name)
-				// Satisfy it by id where an id form exists, so the next run
-				// gets past resolution rather than looping on the same rung.
-				if leaf.Flags().Lookup(name+"-id") != nil {
-					extra = append(extra, "--"+name+"-id", placeholderID)
-				} else {
-					extra = append(extra, "--"+name, placeholderID)
+			// Both addressing modes, because they enforce different things.
+			// Satisfying a requirement with an id skips resolution, so an
+			// id-only walk never reaches the board that resolving a *name*
+			// needs — which is how `cards move` came to document --card and
+			// --list while a caller passing names still got exit 2.
+			walkRequirements(t, leaf, base, true, enforced)
+
+			// The name path pulls in --board on every command that takes an
+			// object by name, which is a rule about resolution rather than a
+			// fact about any one command. It is stated once in the reference
+			// legend instead of repeated in fifteen Requires lines, where it
+			// would also be wrong for a caller passing ids.
+			byName := map[string]bool{}
+			walkRequirements(t, leaf, base, false, byName)
+			for name := range byName {
+				if name != "board" {
+					enforced[name] = true
 				}
 			}
 
@@ -1425,12 +1390,72 @@ func TestEnforcedFlagsAreDerivedFromBehaviourNotAList(t *testing.T) {
 					annotated[f] = true
 				}
 			}
-			for _, name := range enforced {
+			for name := range enforced {
 				if !annotated[name] {
 					t.Errorf("enforces --%s but does not annotate it, so the generated reference omits it", name)
 				}
 			}
 		})
+	}
+}
+
+// walkRequirements satisfies each missing flag in turn and records what the
+// command asked for along the way, so a requirement standing behind another is
+// still seen. Nothing is exempt: board and list are satisfiable from the
+// environment, but "you can set an environment variable instead" is not "you
+// can leave it out", and a reference section with no Requires line reads as a
+// command with no requirements. The legend explains the environment escape
+// once so the annotation can stay honest.
+func walkRequirements(t *testing.T, leaf *cobra.Command, base []string, byID bool, enforced map[string]bool) {
+	t.Helper()
+	flagRef := regexp.MustCompile(`--([a-z][a-z-]*)`)
+	const placeholderID = "5f2b1c9e4a1d2b3c4d5e6f70"
+	const placeholderName = "Placeholder"
+
+	extra := []string{}
+	for range 8 {
+		h := newHarness(t, map[string]string{
+			"TRELLO_API_KEY":      "k",
+			"TRELLO_TOKEN":        "t",
+			"TRELLO_CLI_BASE_URL": "http://127.0.0.1:9",
+			"TRELLO_CLI_TIMEOUT":  "1s",
+		}, nil)
+		if h.run(append(append([]string{}, base...), extra...)...) != errx.CodeUsage {
+			return
+		}
+		var envelope struct {
+			Error struct{ Message string } `json:"error"`
+		}
+		if err := json.Unmarshal([]byte(h.out()), &envelope); err != nil {
+			t.Fatalf("decode envelope: %v", err)
+		}
+		if !strings.Contains(envelope.Error.Message, "is required") {
+			return
+		}
+		match := flagRef.FindStringSubmatch(envelope.Error.Message)
+		if match == nil {
+			return
+		}
+		// --card and --card-id are one requirement; the reference documents
+		// the name form and says so in its legend. Only collapse when the name
+		// form is a real flag: --item-id and --checklist-id have no twin and
+		// are named in full.
+		name := match[1]
+		if trimmed := strings.TrimSuffix(name, "-id"); leaf.Flags().Lookup(trimmed) != nil {
+			name = trimmed
+		}
+		enforced[name] = true
+
+		switch {
+		case byID && leaf.Flags().Lookup(name+"-id") != nil:
+			extra = append(extra, "--"+name+"-id", placeholderID)
+		case byID:
+			extra = append(extra, "--"+name, placeholderID)
+		default:
+			// A name, which is what the docs tell a caller to pass. It forces
+			// resolution, and resolution is what pulls in the board.
+			extra = append(extra, "--"+name, placeholderName)
+		}
 	}
 }
 

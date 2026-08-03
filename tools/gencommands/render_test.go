@@ -68,9 +68,12 @@ func TestIdOnlyFlagsSurviveTwinSuppression(t *testing.T) {
 			t.Errorf("%s was suppressed but has no name twin", flag)
 		}
 	}
-	// While a flag that does have a twin is suppressed.
-	if strings.Contains(out, "--board-id") {
-		t.Error("--board-id has a --board twin and should be suppressed")
+	// While a flag that does have a twin is suppressed. Scoped to the flag
+	// tables: the legend names --board-id in prose deliberately, to explain
+	// that an id is what lets you skip resolution, and that sentence is not a
+	// suppression failure.
+	if strings.Contains(out, "| `--board-id` |") {
+		t.Error("--board-id has a --board twin and should be suppressed from the flag tables")
 	}
 }
 
@@ -109,10 +112,19 @@ func TestRequirementsAreRendered(t *testing.T) {
 	if !strings.Contains(out, "Requires at least one of:") {
 		t.Error("the at-least-one-of requirement is not documented")
 	}
-	// The legend has to explain that two of those flags have an environment
-	// escape, or "Requires" overstates them.
-	if !strings.Contains(out, "TRELLO_CLI_BOARD` and `TRELLO_CLI_LIST") {
-		t.Error("the legend does not mention the environment escape")
+	// The legend carries two rules without which Requires misleads: the
+	// environment escape for board and list, and the fact that addressing
+	// anything by name needs a board on top of whatever Requires lists.
+	// Matched against the legend with newlines flattened, so rewrapping a
+	// paragraph cannot silently drop a rule these assertions exist to protect.
+	flat := strings.Join(strings.Fields(out), " ")
+	for _, rule := range []string{
+		"`TRELLO_CLI_BOARD` and `TRELLO_CLI_LIST`",
+		"a name is resolved within a board",
+	} {
+		if !strings.Contains(flat, rule) {
+			t.Errorf("the legend does not state %q", rule)
+		}
 	}
 }
 

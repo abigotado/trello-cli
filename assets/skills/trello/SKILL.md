@@ -22,7 +22,13 @@ group like `trello-cli cards`) is exit 2 with an envelope, not help text.
 Output is JSON whenever stdout is not a terminal, so no flag is needed. `meta`
 appears only for collections. `meta.truncated` true means the page came back
 exactly as long as `--limit`, which is the only signal Trello gives that more
-*may* exist — it is not a promise that it does. Fetch the next page to find out.
+*may* exist — it is not a promise that it does.
+
+What to do about it depends on the command, and only two take a `--limit` at
+all. `comments list` pages properly: pass `--before` with the oldest id you got.
+`search` does not page — the only way to see more is to re-run it with a larger
+`--limit`. Every other list command returns everything and never reports
+`truncated` true.
 
 ## Exit codes
 
@@ -31,13 +37,20 @@ exactly as long as `--limit`, which is the only signal Trello gives that more
 | 0 | ok | proceed | — |
 | 1 | internal failure | report, do not retry | re-running fails the same way |
 | 2 | usage or validation error | fix the flags | `error.message` names the bad or missing flag |
-| 3 | nothing matched | check the name | re-run with a name from `error.did_you_mean` |
+| 3 | nothing matched | check the name | re-run with a name from `error.did_you_mean`, or list the objects |
 | 4 | several objects matched | pick from candidates | re-run with `--board-id`, `--list-id`, or `--card-id` from `error.candidates` |
 | 5 | missing or rejected credentials | re-authenticate | stop and ask the user to run `trello-cli auth login` |
-| 6 | rate limited or network failure | back off and retry | wait `error.retry_after`, then retry |
+| 6 | rate limited or network failure | back off and retry | wait `error.retry_after` if present, else back off yourself |
 | 7 | destructive operation not confirmed | add `--yes` | only after the user has agreed |
 
 Re-running 1, 2, 3, or 4 unchanged produces the same failure.
+
+Two fields in that table are optional and you must not assume them.
+`error.did_you_mean` appears only when something was close enough to suggest —
+on exit 3 with nothing near, the key is absent, not empty. `error.retry_after`
+appears only when Trello sent a `Retry-After` header, and it is a duration
+string like `"2s"`, not a number. When either is missing, `hint` still tells you
+what to do.
 
 ## Pass names, not ids
 
@@ -56,8 +69,15 @@ Resolution never guesses:
 
 A 24-hex id skips resolution entirely, so a card addressed by its id needs no
 `--board`. An 8-character shortLink does not skip it — names like `Backlog1`
-have the same shape. Set `TRELLO_CLI_BOARD` and `TRELLO_CLI_LIST` to stop
-repeating yourself.
+have the same shape. The reverse is worth knowing too: addressing anything by
+*name* always needs a board, so `--card "Fix login"` without `--board` is exit 2
+even though the reference lists only `--card`.
+
+Keeping `--board` costs nothing and buys something: `cards get` fills in the
+card's `list` only when a board was named on that invocation. Drop it and `list`
+comes back empty rather than absent, which reads as "this card is in no list".
+
+Set `TRELLO_CLI_BOARD` and `TRELLO_CLI_LIST` to stop repeating yourself.
 
 ## Writing
 
@@ -76,7 +96,9 @@ repeating yourself.
   again or you will duplicate.
 - `TRELLO_CLI_READONLY` makes every command that would change Trello exit 2. It
   does not gate local file writes, so `skills install` still works. It is the
-  user's lock — report it, never unset it.
+  user's lock: report it and stop. Never clear it, and never infer its state
+  from the environment — read the `READ_ONLY` error instead, because the
+  variable is a yes/no value and an unrecognised one is itself exit 2.
 
 ## Accounts
 
@@ -97,9 +119,10 @@ The default field set is deliberately small — keep it. Narrow further with
 `-o raw` prints the payload without the envelope and without field projection.
 It is **not** a passthrough of Trello's REST response: the binary decodes into
 its own types first, so a field trello-cli does not model is not there to be
-had. If you need something outside the default set, check
-`reference/commands.md` for a command that exposes it rather than reaching for
-`-o raw`.
+had — by any route. `--fields` rejects a name it does not know and lists the
+ones it has, which is the fastest way to find out what a command can give you.
+A card's description is the field people look for and it is not modelled, so no
+flag and no command will produce it; say so rather than hunting.
 
 ## Where to look next
 

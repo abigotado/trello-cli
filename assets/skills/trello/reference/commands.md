@@ -11,9 +11,15 @@ not gated. **D** cannot be undone from this tool: it needs `--yes` and refuses
 a name prefix. Commands taking an object accept both `--thing` (a name) and
 `--thing-id` (an exact id); only the name form is listed.
 
-**Requires** lists what the command cannot run without. `--board` and `--list`
-can also be supplied by `TRELLO_CLI_BOARD` and `TRELLO_CLI_LIST`; every other
-required flag has to be passed.
+**Requires** lists what the command cannot run without when every object is
+given by id. `--board` and `--list` can also come from `TRELLO_CLI_BOARD` and
+`TRELLO_CLI_LIST`; every other required flag has to be passed.
+
+One rule is not repeated per command: **a name is resolved within a board**,
+so addressing anything by name needs `--board`, `--board-id`, or
+`TRELLO_CLI_BOARD` as well. `--card-id` skips resolution and needs no board;
+`--card "Fix login"` does. This is why a command can list `--card` and `--list`
+under Requires and still exit 2 when you pass names.
 
 ## Global flags
 
