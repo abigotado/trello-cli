@@ -1,0 +1,4 @@
+interface:
+  display_name: "Drive Trello with trello-cli"
+  short_description: "Manage Trello boards, lists, and cards"
+  default_prompt: "Use $trello to read and change Trello boards, lists, and cards."

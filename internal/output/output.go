@@ -5,9 +5,9 @@
 //   - stdout carries only the response envelope. Logs, warnings, progress, and
 //     prompts go to stderr. An agent parses stdout, so anything else written
 //     there corrupts the parse.
-//   - raw Trello REST JSON is never the default. Context is the scarce resource
-//     for the callers this tool is built for, so the default field set is
-//     minimal and everything else is opt-in.
+//   - the default field set is minimal. Context is the scarce resource for the
+//     callers this tool is built for, so everything beyond the curated set is
+//     opt-in.
 package output
 
 import (
@@ -30,7 +30,14 @@ const (
 	FormatText Format = "text"
 	// FormatJSON is the machine envelope.
 	FormatJSON Format = "json"
-	// FormatRaw is Trello's untouched response payload.
+	// FormatRaw is the payload without the envelope and without field
+	// projection.
+	//
+	// Deliberately NOT a passthrough of Trello's REST response: the client
+	// decodes into its own types before anything reaches here, so a field the
+	// tool does not model is already gone. Claiming otherwise would send a
+	// caller looking for a field that cannot appear — a true passthrough needs
+	// the client to carry the response bytes, which it does not.
 	FormatRaw Format = "raw"
 )
 

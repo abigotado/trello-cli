@@ -103,3 +103,27 @@ func TestResolveDoesNotImportCLI(t *testing.T) {
 		}
 	}
 }
+
+// skills needs no client, no credential, and no writer. Keeping those arrows
+// out is what lets the whole package be tested against a temp directory with
+// no network and no keychain.
+func TestSkillsStaysIndependent(t *testing.T) {
+	forbidden := []string{"/internal/cli", "/internal/trello", "/internal/auth", "/internal/output", "/internal/resolve", "/internal/config"}
+	for _, dep := range deps(t, module+"/internal/skills") {
+		for _, bad := range forbidden {
+			if dep == module+bad {
+				t.Errorf("internal/skills imports %s", dep)
+			}
+		}
+	}
+}
+
+// assets carries embedded bytes and nothing else. An import from this module
+// would make the shipped payload depend on the code that ships it.
+func TestAssetsImportsNothingFromThisModule(t *testing.T) {
+	for _, dep := range deps(t, module+"/assets") {
+		if dep != module+"/assets" && strings.HasPrefix(dep, module) {
+			t.Errorf("assets imports %s; it must stay a leaf", dep)
+		}
+	}
+}

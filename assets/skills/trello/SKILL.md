@@ -1,0 +1,109 @@
+---
+name: trello
+description: Manage Trello with the trello-cli binary — read, search, create, update, move, archive, comment on, label, and assign boards, lists, and cards. Use for any Trello request ("what is on my board", "add a card for X", "move this to Done", "who owns this card"), and before shelling out to trello-cli for the first time in a session.
+---
+
+# Drive Trello with trello-cli
+
+`trello-cli` is built to be called by an agent. Every invocation prints one JSON
+envelope on stdout and exits with a code that names your recovery action. Parse
+stdout, branch on the exit code, and follow `hint` — it comes from the binary,
+so when it disagrees with this file, `hint` wins. stderr carries logs only.
+
+```json
+{"ok":true,"v":1,"data":{},"meta":{"count":3,"truncated":false}}
+{"ok":false,"v":1,"error":{"code":"AMBIGUOUS_BOARD","message":"","candidates":[],"did_you_mean":[]},"hint":"pass --board-id"}
+```
+
+Output is JSON whenever stdout is not a terminal, so no flag is needed. `meta`
+appears only for collections; `meta.truncated` true means a `--limit` was hit
+and more exists.
+
+## Exit codes
+
+| Code | Meaning | Next move | Concretely |
+| --- | --- | --- | --- |
+| 0 | ok | proceed | — |
+| 1 | internal failure | report, do not retry | re-running fails the same way |
+| 2 | usage or validation error | fix the flags | `error.message` names the bad or missing flag |
+| 3 | nothing matched | check the name | re-run with a name from `error.did_you_mean` |
+| 4 | several objects matched | pick from candidates | re-run with `--board-id`, `--list-id`, or `--card-id` from `error.candidates` |
+| 5 | missing or rejected credentials | re-authenticate | stop and ask the user to run `trello-cli auth login` |
+| 6 | rate limited or network failure | back off and retry | wait `error.retry_after`, then retry |
+| 7 | destructive operation not confirmed | add `--yes` | only after the user has agreed |
+
+Re-running 1, 2, 3, or 4 unchanged produces the same failure.
+
+## Pass names, not ids
+
+Use the names you already have: `--board "Sprint 12" --list Doing --card "Fix login"`.
+Do not spend a call listing objects to find an id.
+
+Resolution never guesses:
+
+- Exact name wins, then a unique case-insensitive prefix.
+- Several matches gives exit 4 with every match in `error.candidates`. Re-run
+  with `--board-id` / `--list-id` / `--card-id`. Ask the user when the choice is
+  not obvious; do not pick for them.
+- No match gives exit 3 with near names in `error.did_you_mean`.
+- `--fuzzy` adds substring matching. It is off by default because it fails by
+  confidently returning one wrong object. Never use it on a write.
+
+A 24-hex id skips resolution entirely, so a card addressed by its id needs no
+`--board`. An 8-character shortLink does not skip it — names like `Backlog1`
+have the same shape. Set `TRELLO_CLI_BOARD` and `TRELLO_CLI_LIST` to stop
+repeating yourself.
+
+## Writing
+
+- Every mutating command honours `--dry-run`: it resolves all names, prints the
+  ids they resolved to, and stops without calling Trello. Use it before any
+  destructive or repeated change, and to check that a name lands where you think.
+- `cards delete` exits 7 without `--yes` and refuses a prefix match — the target
+  must be an exact name or an id. Get the user's agreement first; `--yes` is you
+  asserting they agreed.
+- `cards archive` and `lists archive` are reversible with `--restore`. Prefer
+  archiving over `cards delete`.
+- `--dry-run` also satisfies the confirmation gate, so you can preview a
+  destructive command without `--yes`.
+- The tool retries what is safe to retry, and never replays a create that may
+  already have been applied. After exit 6 on a create, re-read before creating
+  again or you will duplicate.
+- `TRELLO_CLI_READONLY` makes every mutating command exit 2. It is the user's
+  lock — report it, never unset it.
+
+## Accounts
+
+Credentials are chosen per invocation and there is no "switch account" command.
+Precedence: `--account NAME`, then `TRELLO_API_KEY` plus `TRELLO_TOKEN`, then
+`TRELLO_CLI_ACCOUNT`, then the stored default, then the only account when
+exactly one exists. `trello-cli auth list` shows the names; name one on every
+call when more than one exists.
+
+Never print, log, or paste an API key or token. On exit 5, ask the user to
+authenticate; do not go looking for credentials yourself.
+
+## Output economy
+
+The default field set is deliberately small — keep it. Narrow further with
+`--fields id,name`.
+
+`-o raw` prints the payload without the envelope and without field projection.
+It is **not** a passthrough of Trello's REST response: the binary decodes into
+its own types first, so a field trello-cli does not model is not there to be
+had. If you need something outside the default set, check
+`reference/commands.md` for a command that exposes it rather than reaching for
+`-o raw`.
+
+## Where to look next
+
+- `reference/commands.md` — every command, its flags, which flags are required,
+  and which commands are gated. Generated from the binary.
+- `reference/contract.md` — the full envelope and exit-code specification.
+  Generated from the binary.
+- `trello-cli contract` prints the same exit-code table as JSON at runtime.
+
+Two traps the reference will not shout at you about: move a card between lists
+with `cards move`, not `cards update`; and `checklists add-item` and
+`checklists toggle` take `--checklist-id` and `--item-id` from
+`checklists list`, never names.

@@ -1174,3 +1174,86 @@ func TestChecklistAddItemHasNoUnusedFlags(t *testing.T) {
 		}
 	}
 }
+
+// A requirement enforced in a command body with errx.Usage is invisible to the
+// tree walk that generates the command reference. This derives the list from
+// the tree so a new required flag cannot ship undocumented.
+func TestCommandsEnforcingRequiredFlagsAreAnnotated(t *testing.T) {
+	// Commands whose body rejects a missing flag, keyed by command path.
+	// Derived by reading the errx.Usage("--x is required") sites.
+	wantAnnotated := map[string][]string{
+		"trello-cli lists create":        {"name"},
+		"trello-cli cards create":        {"name"},
+		"trello-cli comments add":        {"text"},
+		"trello-cli checklists create":   {"name"},
+		"trello-cli checklists add-item": {"checklist-id", "name"},
+		"trello-cli checklists toggle":   {"item-id"},
+		"trello-cli attachments add":     {"url"},
+		"trello-cli auth login":          {"api-key", "token"},
+	}
+
+	app := NewApp()
+	root := app.NewRootCommand()
+	found := map[string]string{}
+	var walk func(*cobra.Command)
+	walk = func(c *cobra.Command) {
+		if v, ok := c.Annotations[annotationRequires]; ok {
+			found[c.CommandPath()] = v
+		}
+		for _, sub := range c.Commands() {
+			walk(sub)
+		}
+	}
+	walk(root)
+
+	for path, flags := range wantAnnotated {
+		got, ok := found[path]
+		if !ok {
+			t.Errorf("%s enforces required flags but carries no %q annotation, so the generated reference omits them",
+				path, annotationRequires)
+			continue
+		}
+		want := strings.Join(flags, " ")
+		if got != want {
+			t.Errorf("%s annotation = %q, want %q", path, got, want)
+		}
+	}
+}
+
+// skills install writes to the local filesystem only. TRELLO_CLI_READONLY
+// locks Trello, not this machine, so gating it there would make the lock mean
+// two different things.
+func TestSkillsInstallIsNotGatedByReadOnly(t *testing.T) {
+	dest := t.TempDir()
+	h := newHarness(t, map[string]string{"TRELLO_CLI_READONLY": "1"}, nil)
+	if got := h.run("skills", "install", "--provider", "claude", "--dest", dest); got != errx.CodeOK {
+		t.Fatalf("exit code = %d, want 0\nstdout: %s\nstderr: %s", got, h.out(), h.err())
+	}
+	if _, err := os.Stat(filepath.Join(dest, "trello", "SKILL.md")); err != nil {
+		t.Errorf("the skill was not installed: %v", err)
+	}
+}
+
+// One --dest applied to three providers lands three payloads in one directory,
+// each overwriting the last.
+func TestSkillsInstallRefusesDestWithEveryProvider(t *testing.T) {
+	h := newHarness(t, nil, nil)
+	if got := h.run("skills", "install", "--dest", t.TempDir()); got != errx.CodeUsage {
+		t.Errorf("exit code = %d, want %d", got, errx.CodeUsage)
+	}
+}
+
+func TestSkillsInstallDryRunWritesNothing(t *testing.T) {
+	dest := t.TempDir()
+	h := newHarness(t, nil, nil)
+	if got := h.run("--dry-run", "skills", "install", "--provider", "claude", "--dest", dest); got != errx.CodeOK {
+		t.Fatalf("exit code = %d, want 0\nstderr: %s", got, h.err())
+	}
+	entries, err := os.ReadDir(dest)
+	if err != nil {
+		t.Fatalf("read dest: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("--dry-run created %d entries", len(entries))
+	}
+}

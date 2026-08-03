@@ -576,3 +576,30 @@ func TestEnvelopeKeySetIsPinned(t *testing.T) {
 		}
 	})
 }
+
+// -o raw was documented as Trello's untouched response payload. It is not: the
+// client decodes into its own types first, so a field the tool does not model
+// is already gone by the time the renderer sees it. Shipping that claim in the
+// agent-facing skill would send a caller looking for a field that cannot
+// appear.
+func TestRawIsNotAPassthrough(t *testing.T) {
+	w, out, _ := newWriter(FormatRaw, nil)
+	if err := w.Success(card{id: "1", name: "A"}); err != nil {
+		t.Fatalf("Success() error = %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("bad JSON: %v\n%s", err, out.String())
+	}
+	// No envelope, which is what raw is actually for.
+	for _, wrapper := range []string{"ok", "v", "data", "meta"} {
+		if _, ok := got[wrapper]; ok {
+			t.Errorf("raw output carries the envelope key %q", wrapper)
+		}
+	}
+	// And it cannot carry anything the type does not declare, which is the
+	// claim that must never be made in the shipped skill.
+	if _, ok := got["somethingTrelloReturnedButWeDoNotModel"]; ok {
+		t.Error("raw somehow produced an unmodelled field")
+	}
+}

@@ -109,7 +109,7 @@ func (a *App) newAuthLoginCommand() *cobra.Command {
 	cmd.Flags().StringVar(&apiKey, "api-key", "", "Trello API key")
 	cmd.Flags().StringVar(&token, "token", "", "Trello API token")
 
-	return a.newCommand(cmd, func(ctx context.Context, _ *cobra.Command, args []string) error {
+	return a.newCommand(requires(cmd, "api-key", "token"), func(ctx context.Context, _ *cobra.Command, args []string) error {
 		// Deliberately does not quote or echo the argument: it is very likely
 		// to be the token itself.
 		if len(args) > 0 {

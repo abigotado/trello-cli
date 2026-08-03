@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime/debug"
+	"strings"
 	"syscall"
 	"time"
 
@@ -32,7 +33,37 @@ const (
 	// annotationDestructive marks a command whose effect cannot be undone from
 	// this tool. It additionally requires --yes.
 	annotationDestructive = "destructive"
+	// annotationRequires lists flags a command cannot run without, and
+	// annotationRequiresOneOf lists flags it needs at least one of.
+	//
+	// These exist because the requirement is enforced in the command body with
+	// errx.Usage, which a tree walk cannot see — so the generated command
+	// reference would omit its single most useful fact. They are not
+	// cobra.MarkFlagRequired: cobra returns that error from execute(), bypassing
+	// SetFlagErrorFunc below, so a missing required flag would exit 1 (an
+	// internal defect) instead of 2 (the caller's mistake).
+	annotationRequires      = "requires"
+	annotationRequiresOneOf = "requires_one_of"
 )
+
+// requires records flags the command cannot run without.
+func requires(cmd *cobra.Command, flags ...string) *cobra.Command {
+	return annotate(cmd, annotationRequires, flags)
+}
+
+// requiresOneOf records flags the command needs at least one of.
+func requiresOneOf(cmd *cobra.Command, flags ...string) *cobra.Command {
+	return annotate(cmd, annotationRequiresOneOf, flags)
+}
+
+func annotate(cmd *cobra.Command, key string, flags []string) *cobra.Command {
+	if cmd.Annotations == nil {
+		cmd.Annotations = map[string]string{}
+	}
+	// Space-joined in author order, so the rendered reference is deterministic.
+	cmd.Annotations[key] = strings.Join(flags, " ")
+	return cmd
+}
 
 // App is the per-invocation state shared by every command.
 type App struct {
@@ -81,6 +112,10 @@ func NewApp() *App {
 		stderr:    os.Stderr,
 	}
 }
+
+// docs/commands.md and the shipped skill reference are produced from this
+// command tree, so a flag cannot be renamed here and left stale there.
+//go:generate go run github.com/abigotado/trello-cli/tools/gencommands
 
 // NewRootCommand assembles the command tree.
 func (a *App) NewRootCommand() *cobra.Command {
@@ -134,6 +169,7 @@ func (a *App) NewRootCommand() *cobra.Command {
 		a.newContractCommand(),
 		a.newMeCommand(),
 		a.newAuthCommand(),
+		a.newSkillsCommand(),
 	)
 	root.AddCommand(a.readCommands()...)
 	return root

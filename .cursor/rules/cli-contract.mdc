@@ -80,5 +80,11 @@ Two hazards that are easy to reintroduce:
 ## Output economy
 
 Context is the scarce resource. Default output is one compact line per entity
-with a minimal field set. Raw Trello REST JSON is never the default — it is
-`-o raw`, opt-in. A command that dumps unfiltered API responses is a bug.
+with a minimal field set. A command that dumps unfiltered API responses is a bug.
+
+`-o raw` prints the payload without the envelope and without projection. It is
+**not** a passthrough of Trello's response: the client decodes into its own
+types first, so a field the tool does not model never reaches the renderer.
+Documenting it as a passthrough would send a caller looking for a field that
+cannot appear. A real passthrough would require the client to retain the
+response bytes; that is a deliberate non-goal, not an oversight.

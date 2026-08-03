@@ -101,7 +101,7 @@ func (a *App) listsWriteCommands() []*cobra.Command {
 	create.Flags().StringVar(&name, "name", "", "list name")
 	create.Flags().StringVar(&pos, "pos", "", "position: top, bottom, or a number")
 
-	createCmd := a.newCommand(mutating(create), func(ctx context.Context, _ *cobra.Command, _ []string) error {
+	createCmd := a.newCommand(requires(mutating(create), "name"), func(ctx context.Context, _ *cobra.Command, _ []string) error {
 		if name == "" {
 			return errx.Usage("--name is required")
 		}
@@ -194,7 +194,7 @@ func (a *App) cardCreateCommand() *cobra.Command {
 	cmd.Flags().StringVar(&due, "due", "", "due date, ISO 8601")
 	cmd.Flags().StringVar(&pos, "pos", "", "position: top, bottom, or a number")
 
-	return a.newCommand(mutating(cmd), func(ctx context.Context, c *cobra.Command, _ []string) error {
+	return a.newCommand(requires(mutating(cmd), "name"), func(ctx context.Context, c *cobra.Command, _ []string) error {
 		if name == "" {
 			return errx.Usage("--name is required")
 		}
@@ -250,7 +250,7 @@ func (a *App) cardUpdateCommand() *cobra.Command {
 	cmd.Flags().BoolVar(&dueComplete, "due-complete", false, "mark the due date complete")
 	cmd.Flags().BoolVar(&clearDue, "clear-due", false, "remove the due date")
 
-	return a.newCommand(mutating(cmd), func(ctx context.Context, c *cobra.Command, _ []string) error {
+	return a.newCommand(requiresOneOf(mutating(cmd), "name", "desc", "due", "clear-due", "due-complete"), func(ctx context.Context, c *cobra.Command, _ []string) error {
 		if clearDue && c.Flags().Changed("due") {
 			return errx.Usage("--due and --clear-due contradict each other")
 		}
@@ -590,7 +590,7 @@ func (a *App) commentsWriteCommands() []*cobra.Command {
 	cardRef.bind(cmd, "card", "card name, id, or shortLink")
 	cmd.Flags().StringVar(&text, "text", "", "comment body")
 
-	return []*cobra.Command{a.newCommand(mutating(cmd), func(ctx context.Context, _ *cobra.Command, _ []string) error {
+	return []*cobra.Command{a.newCommand(requires(mutating(cmd), "text"), func(ctx context.Context, _ *cobra.Command, _ []string) error {
 		if text == "" {
 			return errx.Usage("--text is required")
 		}
@@ -621,7 +621,7 @@ func (a *App) checklistsWriteCommands() []*cobra.Command {
 	cardRef.bind(create, "card", "card name, id, or shortLink")
 	create.Flags().StringVar(&name, "name", "", "checklist name")
 
-	createCmd := a.newCommand(mutating(create), func(ctx context.Context, _ *cobra.Command, _ []string) error {
+	createCmd := a.newCommand(requires(mutating(create), "name"), func(ctx context.Context, _ *cobra.Command, _ []string) error {
 		if name == "" {
 			return errx.Usage("--name is required")
 		}
@@ -652,7 +652,7 @@ func (a *App) checklistsWriteCommands() []*cobra.Command {
 	addItem.Flags().StringVar(&checklistID, "checklist-id", "", "checklist id, from 'checklists list'")
 	addItem.Flags().StringVar(&itemName, "name", "", "item text")
 
-	addItemCmd := a.newCommand(mutating(addItem), func(ctx context.Context, _ *cobra.Command, _ []string) error {
+	addItemCmd := a.newCommand(requires(mutating(addItem), "checklist-id", "name"), func(ctx context.Context, _ *cobra.Command, _ []string) error {
 		if checklistID == "" || itemName == "" {
 			return errx.Usage("--checklist-id and --name are required")
 		}
@@ -681,7 +681,7 @@ func (a *App) checklistsWriteCommands() []*cobra.Command {
 	toggle.Flags().StringVar(&itemID, "item-id", "", "check item id, from 'checklists list'")
 	toggle.Flags().BoolVar(&undone, "undone", false, "mark incomplete instead of complete")
 
-	toggleCmd := a.newCommand(mutating(toggle), func(ctx context.Context, _ *cobra.Command, _ []string) error {
+	toggleCmd := a.newCommand(requires(mutating(toggle), "item-id"), func(ctx context.Context, _ *cobra.Command, _ []string) error {
 		if itemID == "" {
 			return errx.Usage("--item-id is required")
 		}
@@ -722,7 +722,7 @@ func (a *App) attachmentsWriteCommands() []*cobra.Command {
 	cmd.Flags().StringVar(&attachURL, "url", "", "URL to attach")
 	cmd.Flags().StringVar(&name, "name", "", "display name for the attachment")
 
-	return []*cobra.Command{a.newCommand(mutating(cmd), func(ctx context.Context, _ *cobra.Command, _ []string) error {
+	return []*cobra.Command{a.newCommand(requires(mutating(cmd), "url"), func(ctx context.Context, _ *cobra.Command, _ []string) error {
 		if attachURL == "" {
 			return errx.Usage("--url is required")
 		}
