@@ -1346,13 +1346,14 @@ func TestVersionNeedsNoCredentials(t *testing.T) {
 // requirement from the binary's own behaviour means a newly enforced flag
 // fails the build until it is annotated, and therefore documented.
 func TestEnforcedFlagsAreDerivedFromBehaviourNotAList(t *testing.T) {
-	// Board and list are deliberately excluded: both are satisfiable by an
-	// environment variable (TRELLO_CLI_BOARD, TRELLO_CLI_LIST), so they are
-	// conditional rather than required, and each command that needs one says
-	// so in the flag's own description. A card has no such escape, which is
-	// why --card belongs in the annotation everywhere it is enforced.
-	conditional := map[string]bool{"board": true, "list": true}
+	// Nothing is exempt. Board and list are satisfiable from the environment
+	// (TRELLO_CLI_BOARD, TRELLO_CLI_LIST), but "you can set an environment
+	// variable instead" is not the same as "you can leave it out": a reference
+	// section with no Requires line reads as a command with no requirements.
+	// The legend explains the environment escape once, so the annotation can
+	// stay honest here.
 	flagRef := regexp.MustCompile(`--([a-z][a-z-]*)`)
+	const placeholderID = "5f2b1c9e4a1d2b3c4d5e6f70"
 
 	var leaves []*cobra.Command
 	var walk func(*cobra.Command)
@@ -1369,46 +1370,65 @@ func TestEnforcedFlagsAreDerivedFromBehaviourNotAList(t *testing.T) {
 	for _, leaf := range leaves {
 		path := leaf.CommandPath()
 		t.Run(path, func(t *testing.T) {
-			h := newHarness(t, map[string]string{
-				"TRELLO_API_KEY":      "k",
-				"TRELLO_TOKEN":        "t",
-				"TRELLO_CLI_BASE_URL": "http://127.0.0.1:9",
-				"TRELLO_CLI_TIMEOUT":  "1s",
-			}, nil)
-			if h.run(strings.Fields(strings.TrimPrefix(path, "trello-cli "))...) != errx.CodeUsage {
-				return
-			}
-			var envelope struct {
-				Error struct{ Message string } `json:"error"`
-			}
-			if err := json.Unmarshal([]byte(h.out()), &envelope); err != nil {
-				t.Fatalf("decode envelope: %v", err)
-			}
-			if !strings.Contains(envelope.Error.Message, "is required") {
-				return
-			}
+			base := strings.Fields(strings.TrimPrefix(path, "trello-cli "))
+			extra := []string{}
+			enforced := []string{}
 
-			annotated := map[string]bool{}
-			for _, f := range strings.Fields(leaf.Annotations[annotationRequires]) {
-				annotated[f] = true
-			}
-			for _, f := range strings.Fields(leaf.Annotations[annotationRequiresOneOf]) {
-				annotated[f] = true
-			}
-			for _, m := range flagRef.FindAllStringSubmatch(envelope.Error.Message, -1) {
+			// One requirement hides behind another: lists archive reports the
+			// missing board first and only asks for the list once it has one.
+			// Satisfying each in turn walks the whole chain instead of
+			// stopping at the first rung.
+			for range 8 {
+				h := newHarness(t, map[string]string{
+					"TRELLO_API_KEY":      "k",
+					"TRELLO_TOKEN":        "t",
+					"TRELLO_CLI_BASE_URL": "http://127.0.0.1:9",
+					"TRELLO_CLI_TIMEOUT":  "1s",
+				}, nil)
+				if h.run(append(append([]string{}, base...), extra...)...) != errx.CodeUsage {
+					break
+				}
+				var envelope struct {
+					Error struct{ Message string } `json:"error"`
+				}
+				if err := json.Unmarshal([]byte(h.out()), &envelope); err != nil {
+					t.Fatalf("decode envelope: %v", err)
+				}
+				if !strings.Contains(envelope.Error.Message, "is required") {
+					break
+				}
+				match := flagRef.FindStringSubmatch(envelope.Error.Message)
+				if match == nil {
+					break
+				}
 				// --card and --card-id are one requirement; the reference
 				// documents the name form and says so in its legend. Only
 				// collapse when the name form is a real flag: --item-id and
 				// --checklist-id have no twin and are named in full.
-				name := m[1]
+				name := match[1]
 				if base := strings.TrimSuffix(name, "-id"); leaf.Flags().Lookup(base) != nil {
 					name = base
 				}
-				if conditional[name] || annotated[name] {
-					continue
+				enforced = append(enforced, name)
+				// Satisfy it by id where an id form exists, so the next run
+				// gets past resolution rather than looping on the same rung.
+				if leaf.Flags().Lookup(name+"-id") != nil {
+					extra = append(extra, "--"+name+"-id", placeholderID)
+				} else {
+					extra = append(extra, "--"+name, placeholderID)
 				}
-				t.Errorf("enforces --%s (%q) but does not annotate it, so the generated reference omits it",
-					name, envelope.Error.Message)
+			}
+
+			annotated := map[string]bool{}
+			for _, key := range []string{annotationRequires, annotationRequiresOneOf} {
+				for _, f := range strings.Fields(leaf.Annotations[key]) {
+					annotated[f] = true
+				}
+			}
+			for _, name := range enforced {
+				if !annotated[name] {
+					t.Errorf("enforces --%s but does not annotate it, so the generated reference omits it", name)
+				}
 			}
 		})
 	}
@@ -1432,4 +1452,45 @@ func TestAnnotatedFlagsExist(t *testing.T) {
 		}
 	}
 	walk(NewApp().NewRootCommand())
+}
+
+// Exit 0 with non-envelope stdout is the one combination a machine caller
+// cannot survive: the code says "succeeded, parse stdout" and stdout then
+// holds usage prose. Cobra's default for a command with subcommands does
+// exactly that, so this walks the whole tree rather than naming the three
+// groups that happened to be reported.
+func TestNoCommandExitsZeroWithoutAnEnvelope(t *testing.T) {
+	var paths []string
+	var walk func(*cobra.Command)
+	walk = func(c *cobra.Command) {
+		paths = append(paths, c.CommandPath())
+		for _, sub := range c.Commands() {
+			walk(sub)
+		}
+	}
+	walk(NewApp().NewRootCommand())
+
+	for _, path := range paths {
+		t.Run(path, func(t *testing.T) {
+			h := newHarness(t, map[string]string{
+				"TRELLO_API_KEY":      "k",
+				"TRELLO_TOKEN":        "t",
+				"TRELLO_CLI_BASE_URL": "http://127.0.0.1:9",
+				"TRELLO_CLI_TIMEOUT":  "1s",
+			}, nil)
+			args := strings.Fields(strings.TrimPrefix(path, "trello-cli"))
+			code := h.run(args...)
+			out := h.out()
+			if code != errx.CodeOK {
+				return
+			}
+			var envelope map[string]any
+			if err := json.Unmarshal([]byte(out), &envelope); err != nil {
+				t.Fatalf("exited 0 but stdout is not an envelope: %v\nstdout: %.200s", err, out)
+			}
+			if _, ok := envelope["ok"]; !ok {
+				t.Errorf("exited 0 and printed JSON with no \"ok\" key: %.200s", out)
+			}
+		})
+	}
 }

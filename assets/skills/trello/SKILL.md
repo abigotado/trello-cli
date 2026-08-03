@@ -10,14 +10,19 @@ envelope on stdout and exits with a code that names your recovery action. Parse
 stdout, branch on the exit code, and follow `hint` — it comes from the binary,
 so when it disagrees with this file, `hint` wins. stderr carries logs only.
 
+The one exception is `--help`, which prints human-readable text on stdout and
+exits 0. Read it, do not parse it. Naming no command at all (`trello-cli`, or a
+group like `trello-cli cards`) is exit 2 with an envelope, not help text.
+
 ```json
 {"ok":true,"v":1,"data":{},"meta":{"count":3,"truncated":false}}
 {"ok":false,"v":1,"error":{"code":"AMBIGUOUS_BOARD","message":"","candidates":[],"did_you_mean":[]},"hint":"pass --board-id"}
 ```
 
 Output is JSON whenever stdout is not a terminal, so no flag is needed. `meta`
-appears only for collections; `meta.truncated` true means a `--limit` was hit
-and more exists.
+appears only for collections. `meta.truncated` true means the page came back
+exactly as long as `--limit`, which is the only signal Trello gives that more
+*may* exist — it is not a promise that it does. Fetch the next page to find out.
 
 ## Exit codes
 
@@ -69,8 +74,9 @@ repeating yourself.
 - The tool retries what is safe to retry, and never replays a create that may
   already have been applied. After exit 6 on a create, re-read before creating
   again or you will duplicate.
-- `TRELLO_CLI_READONLY` makes every mutating command exit 2. It is the user's
-  lock — report it, never unset it.
+- `TRELLO_CLI_READONLY` makes every command that would change Trello exit 2. It
+  does not gate local file writes, so `skills install` still works. It is the
+  user's lock — report it, never unset it.
 
 ## Accounts
 

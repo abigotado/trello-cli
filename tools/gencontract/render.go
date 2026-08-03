@@ -53,6 +53,9 @@ func renderMarkdown(c errx.Contract) string {
 	b.WriteString("  recovered and reported as `1`.\n")
 	b.WriteString("- Output defaults to `json` when stdout is not a terminal.\n")
 	b.WriteString("- stdout carries only the envelope; logs and prompts go to stderr.\n")
+	b.WriteString("  `--help` and `-h` are the exception: they print usage prose on stdout and\n")
+	b.WriteString("  exit 0. Naming no command at all is exit 2 with an envelope, so a caller\n")
+	b.WriteString("  never sees exit 0 paired with output it cannot parse.\n")
 	b.WriteString("- `trello-cli contract` prints this same table as JSON at runtime.\n")
 
 	return b.String()

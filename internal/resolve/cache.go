@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"time"
@@ -166,6 +167,64 @@ func (c *Cache) Clear() error {
 		return err
 	}
 	return nil
+}
+
+// Dir reports the directory holding every account's index file.
+func Dir() (string, error) {
+	base, err := os.UserCacheDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(base, "trello-cli"), nil
+}
+
+// ClearAll removes every index file in the cache directory, whichever
+// credential wrote it, and reports the directory and how many it removed.
+//
+// Clearing deliberately does not go through a Cache value. The index filename
+// is keyed by a hash of the token, so a Cache built without credentials
+// addresses a file that never existed: it reports success, removes nothing,
+// and the next lookup is still served from the index the user asked to be rid
+// of. Clearing has to work when the credential that wrote the index is gone —
+// that is the main reason to clear one — so it works from the directory
+// instead.
+//
+// Only index files are touched. Anything else under the directory is left
+// alone rather than assumed to be ours.
+func ClearAll() (string, int, error) {
+	dir, err := Dir()
+	if err != nil {
+		return "", 0, err
+	}
+	matches, err := filepath.Glob(filepath.Join(dir, "index-*.json"))
+	if err != nil {
+		return dir, 0, err
+	}
+	removed := 0
+	for _, name := range matches {
+		if err := os.Remove(name); err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return dir, removed, fmt.Errorf("remove %s: %w", name, err)
+		}
+		removed++
+	}
+	return dir, removed, nil
+}
+
+// Pending reports how many index files exist, for a dry run to report what a
+// clear would remove.
+func Pending() (string, int, error) {
+	dir, err := Dir()
+	if err != nil {
+		return "", 0, err
+	}
+	matches, err := filepath.Glob(filepath.Join(dir, "index-*.json"))
+	if err != nil {
+		return dir, 0, err
+	}
+	return dir, len(matches), nil
 }
 
 // Path reports the on-disk location, for `cache clear` to report.

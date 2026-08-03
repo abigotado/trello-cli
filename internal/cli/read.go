@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"strconv"
 
 	"github.com/abigotado/trello-cli/internal/errx"
 	"github.com/abigotado/trello-cli/internal/output"
@@ -33,7 +34,12 @@ func group(use, short string, subs ...*cobra.Command) *cobra.Command {
 		Use:   use,
 		Short: short,
 		Args:  usageArgs(cobra.NoArgs),
-		RunE:  func(c *cobra.Command, _ []string) error { return c.Help() },
+		// A group is not runnable. Printing help and exiting 0 would tell a
+		// machine caller the command succeeded and hand it usage prose to
+		// parse; see the root command for the same reasoning.
+		RunE: func(c *cobra.Command, _ []string) error {
+			return errx.Usage("%s needs a subcommand", c.CommandPath())
+		},
 	}
 	cmd.AddCommand(subs...)
 	return cmd
@@ -70,7 +76,7 @@ func (a *App) newBoardsCommand() *cobra.Command {
 		Args:  cobra.NoArgs,
 	}
 	ref.bind(get, "board", "board name, id, or shortLink")
-	getCmd := a.newCommand(get, func(ctx context.Context, _ *cobra.Command, _ []string) error {
+	getCmd := a.newCommand(requires(get, "board"), func(ctx context.Context, _ *cobra.Command, _ []string) error {
 		client, err := a.trelloClient(ctx)
 		if err != nil {
 			return err
@@ -102,7 +108,7 @@ func (a *App) newListsCommand() *cobra.Command {
 	boardRef.bind(cmd, "board", "board name, id, or shortLink")
 	cmd.Flags().BoolVar(&includeClosed, "all", false, "include archived lists")
 
-	sub := a.newCommand(cmd, func(ctx context.Context, _ *cobra.Command, _ []string) error {
+	sub := a.newCommand(requires(cmd, "board"), func(ctx context.Context, _ *cobra.Command, _ []string) error {
 		client, err := a.trelloClient(ctx)
 		if err != nil {
 			return err
@@ -144,7 +150,7 @@ func (a *App) newCardsCommand() *cobra.Command {
 	listRef.bind(list, "list", "restrict to one list, by name or id")
 	list.Flags().BoolVar(&includeClosed, "all", false, "include archived cards")
 
-	listCmd := a.newCommand(list, func(ctx context.Context, _ *cobra.Command, _ []string) error {
+	listCmd := a.newCommand(requires(list, "board"), func(ctx context.Context, _ *cobra.Command, _ []string) error {
 		client, err := a.trelloClient(ctx)
 		if err != nil {
 			return err
@@ -229,7 +235,7 @@ func (a *App) newLabelsCommand() *cobra.Command {
 	cmd := &cobra.Command{Use: "list", Short: "List the labels defined on a board", Args: cobra.NoArgs}
 	boardRef.bind(cmd, "board", "board name, id, or shortLink")
 
-	sub := a.newCommand(cmd, func(ctx context.Context, _ *cobra.Command, _ []string) error {
+	sub := a.newCommand(requires(cmd, "board"), func(ctx context.Context, _ *cobra.Command, _ []string) error {
 		client, err := a.trelloClient(ctx)
 		if err != nil {
 			return err
@@ -256,7 +262,7 @@ func (a *App) newMembersCommand() *cobra.Command {
 	cmd := &cobra.Command{Use: "list", Short: "List the members of a board", Args: cobra.NoArgs}
 	boardRef.bind(cmd, "board", "board name, id, or shortLink")
 
-	sub := a.newCommand(cmd, func(ctx context.Context, _ *cobra.Command, _ []string) error {
+	sub := a.newCommand(requires(cmd, "board"), func(ctx context.Context, _ *cobra.Command, _ []string) error {
 		client, err := a.trelloClient(ctx)
 		if err != nil {
 			return err
@@ -410,23 +416,39 @@ func (a *App) newCacheCommand() *cobra.Command {
 			Args:  cobra.NoArgs,
 		},
 		func(ctx context.Context, _ *cobra.Command, _ []string) error {
-			// Deliberately does not require credentials: clearing a cache must
-			// work even when the credential that created it is gone.
-			cache := resolve.NewCache(a.token, 0)
+			// Works from the cache directory, not from a Cache value. This
+			// command deliberately does not load credentials, and an index
+			// filename is keyed by a hash of the token: a Cache built without
+			// one addresses a file that never existed, so it reported success
+			// while the real index survived. Clearing has to work when the
+			// credential that wrote the index is gone.
 			if a.dryRun {
-				return a.out.Success(cacheStatusView{Path: cache.Path(), Cleared: false})
+				dir, pending, err := resolve.Pending()
+				if err != nil {
+					return errx.Internal("inspect cache: %v", err)
+				}
+				return a.out.Success(cacheStatusView{Path: dir, Removed: pending, Cleared: false})
 			}
-			if err := cache.Clear(); err != nil {
+			dir, removed, err := resolve.ClearAll()
+			if err != nil {
 				return errx.Internal("clear cache: %v", err)
 			}
-			return a.out.Success(cacheStatusView{Path: cache.Path(), Cleared: true})
+			return a.out.Success(cacheStatusView{Path: dir, Removed: removed, Cleared: removed > 0})
 		},
 	)
 	return group("cache", "Manage the local name-resolution index", clear)
 }
 
+// cacheStatusView reports what a clear did.
+//
+// removed is the useful number: cleared was previously true on every run,
+// including the runs that removed nothing, which is what let a broken clear
+// look like a working one. cleared now means "something went away", and
+// removed says how much. path is the directory, since one index exists per
+// stored account.
 type cacheStatusView struct {
 	Path    string `json:"path"`
+	Removed int    `json:"removed"`
 	Cleared bool   `json:"cleared"`
 }
 
@@ -437,6 +459,7 @@ func (c cacheStatusView) Fields() []output.Field {
 	}
 	return []output.Field{
 		{Name: "cleared", Value: state, Raw: c.Cleared},
+		{Name: "removed", Value: strconv.Itoa(c.Removed), Raw: c.Removed},
 		{Name: "path", Value: c.Path, Raw: c.Path},
 	}
 }

@@ -4,11 +4,12 @@ Manage Trello from the command line, or from an AI agent shelling out to it.
 
 Every invocation prints one JSON envelope on stdout and exits with a code that
 names the caller's next move, so an agent can drive it with no model in the
-parsing loop.
+parsing loop. `--help` is the one exception: it is prose, for people.
 
 - **Stable envelope** — `{"ok":true,"v":1,"data":…,"meta":…}` or
-  `{"ok":false,"v":1,"error":…,"hint":…}`. JSON automatically whenever stdout is
-  not a terminal, text when you are at one. stderr carries logs only.
+  `{"ok":false,"v":1,"error":…,"hint":…}` on stdout, for every invocation except
+  `--help`, which is prose for humans. JSON automatically whenever stdout is not
+  a terminal, text when you are at one. stderr carries logs only.
 - **Documented exit codes** — 0 through 7, one per distinct recovery action.
   `trello-cli contract` prints the table as JSON at runtime.
 - **Resolution that never guesses** — pass `--board "Sprint 12" --list Doing`,
@@ -17,7 +18,7 @@ parsing loop.
   exists behind `--fuzzy` and is off by default.
 - **Dry-run rails** — every mutating command takes `--dry-run` and reports the
   ids the names resolved to without calling Trello. `cards delete` needs
-  `--yes`. `TRELLO_CLI_READONLY` turns every write into a usage error.
+  `--yes`. `TRELLO_CLI_READONLY` turns every write to Trello into a usage error.
 - **Installable skill** — `trello-cli skills install` teaches Claude Code,
   Codex, and Cursor how to call it, reference docs included.
 
@@ -149,6 +150,6 @@ Drop `--dry-run` to apply it.
   validation gate.
 
 Environment: `TRELLO_CLI_BOARD` and `TRELLO_CLI_LIST` supply defaults for
-`--board` and `--list`; `TRELLO_CLI_READONLY` disables every write;
+`--board` and `--list`; `TRELLO_CLI_READONLY` disables every write to Trello;
 `TRELLO_CLI_TIMEOUT`, `TRELLO_CLI_CONCURRENCY`, and `TRELLO_CLI_BASE_URL` tune
 the rest.

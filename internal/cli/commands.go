@@ -56,7 +56,11 @@ func (a *App) newAuthCommand() *cobra.Command {
 			"There is deliberately no command to switch the active account: that would\n" +
 			"be hidden global state, and two concurrent runs would race over it.",
 		Args: usageArgs(cobra.NoArgs),
-		RunE: func(c *cobra.Command, _ []string) error { return c.Help() },
+		// Not runnable on its own; see group() in read.go for why this is a
+		// usage error rather than help printed with exit 0.
+		RunE: func(c *cobra.Command, _ []string) error {
+			return errx.Usage("%s needs a subcommand", c.CommandPath())
+		},
 	}
 	cmd.AddCommand(
 		a.newAuthLoginCommand(),

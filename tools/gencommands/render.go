@@ -159,10 +159,14 @@ func renderMarkdown(globals []flagInfo, leaves []leafInfo) string {
 	b.WriteString("Every command prints one JSON envelope on stdout and exits with a code that\n")
 	b.WriteString("names the recovery action. See `contract.md` for the envelope and the codes.\n\n")
 
-	b.WriteString("Legend: **W** changes remote state and is refused when `TRELLO_CLI_READONLY`\n")
-	b.WriteString("is set. **D** cannot be undone from this tool: it needs `--yes` and refuses a\n")
-	b.WriteString("name prefix. Commands taking an object accept both `--thing` (a name) and\n")
+	b.WriteString("Legend: **W** changes state on Trello and is refused when `TRELLO_CLI_READONLY`\n")
+	b.WriteString("is set. It does not cover local files: `skills install` writes to disk and is\n")
+	b.WriteString("not gated. **D** cannot be undone from this tool: it needs `--yes` and refuses\n")
+	b.WriteString("a name prefix. Commands taking an object accept both `--thing` (a name) and\n")
 	b.WriteString("`--thing-id` (an exact id); only the name form is listed.\n\n")
+	b.WriteString("**Requires** lists what the command cannot run without. `--board` and `--list`\n")
+	b.WriteString("can also be supplied by `TRELLO_CLI_BOARD` and `TRELLO_CLI_LIST`; every other\n")
+	b.WriteString("required flag has to be passed.\n\n")
 
 	b.WriteString("## Global flags\n\nAvailable on every command.\n\n")
 	b.WriteString("| Flag | Type | Description |\n| --- | --- | --- |\n")

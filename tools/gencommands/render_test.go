@@ -92,11 +92,27 @@ func TestGatesAreRendered(t *testing.T) {
 // without the annotation the reference omits its most useful fact.
 func TestRequirementsAreRendered(t *testing.T) {
 	out := renderFromTree()
-	if !strings.Contains(out, "Requires: `--name`") {
-		t.Error("a required flag is not documented")
+	// Whole lines, not a bare "Requires: `--name`" substring. A requirement
+	// chain is only useful if it is complete, and the substring stayed true
+	// while --board went undocumented on every command that needs one.
+	want := []string{
+		"Requires: `--board`, `--name`",        // lists create
+		"Requires: `--board`, `--list`",        // lists archive
+		"Requires: `--card`, `--label`",        // labels add
+		"Requires: `--checklist-id`, `--name`", // checklists add-item
+	}
+	for _, line := range want {
+		if !strings.Contains(out, line) {
+			t.Errorf("the reference is missing %q", line)
+		}
 	}
 	if !strings.Contains(out, "Requires at least one of:") {
 		t.Error("the at-least-one-of requirement is not documented")
+	}
+	// The legend has to explain that two of those flags have an environment
+	// escape, or "Requires" overstates them.
+	if !strings.Contains(out, "TRELLO_CLI_BOARD` and `TRELLO_CLI_LIST") {
+		t.Error("the legend does not mention the environment escape")
 	}
 }
 

@@ -343,3 +343,51 @@ func modTime(t *testing.T, path string) int64 {
 	}
 	return info.ModTime().UnixNano()
 }
+
+// Clearing must not go through a Cache value. The index filename is keyed by a
+// hash of the token, so a Cache built without credentials — which is how the
+// `cache clear` command builds one, deliberately, so that clearing works after
+// the credential is gone — addresses a file that never existed. It reported
+// success and removed nothing, and the next lookup was still served from the
+// index the user had just asked to be rid of.
+func TestClearAllRemovesIndexesWrittenByAnyCredential(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", dir)
+	t.Setenv("HOME", dir)
+
+	base, err := Dir()
+	if err != nil {
+		t.Fatalf("cache dir: %v", err)
+	}
+	if err := os.MkdirAll(base, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	// Two accounts, plus a file that is not ours.
+	for _, name := range []string{"index-aaaaaaaaaaaa.json", "index-bbbbbbbbbbbb.json", "notes.txt"} {
+		if err := os.WriteFile(filepath.Join(base, name), []byte("{}"), 0o600); err != nil {
+			t.Fatalf("seed %s: %v", name, err)
+		}
+	}
+
+	gotDir, pending, err := Pending()
+	if err != nil {
+		t.Fatalf("Pending: %v", err)
+	}
+	if gotDir != base || pending != 2 {
+		t.Errorf("Pending() = %q, %d; want %q, 2", gotDir, pending, base)
+	}
+
+	gotDir, removed, err := ClearAll()
+	if err != nil {
+		t.Fatalf("ClearAll: %v", err)
+	}
+	if gotDir != base || removed != 2 {
+		t.Errorf("ClearAll() = %q, %d; want %q, 2", gotDir, removed, base)
+	}
+	if _, err := os.Stat(filepath.Join(base, "notes.txt")); err != nil {
+		t.Errorf("ClearAll removed a file it does not own: %v", err)
+	}
+	if _, _, err := ClearAll(); err != nil {
+		t.Errorf("clearing an already-clear cache should not fail: %v", err)
+	}
+}

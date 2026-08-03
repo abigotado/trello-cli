@@ -43,4 +43,7 @@ would be the same as an existing code's, it belongs in `error.code` instead.
   recovered and reported as `1`.
 - Output defaults to `json` when stdout is not a terminal.
 - stdout carries only the envelope; logs and prompts go to stderr.
+  `--help` and `-h` are the exception: they print usage prose on stdout and
+  exit 0. Naming no command at all is exit 2 with an envelope, so a caller
+  never sees exit 0 paired with output it cannot parse.
 - `trello-cli contract` prints this same table as JSON at runtime.

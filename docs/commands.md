@@ -5,10 +5,15 @@
 Every command prints one JSON envelope on stdout and exits with a code that
 names the recovery action. See `contract.md` for the envelope and the codes.
 
-Legend: **W** changes remote state and is refused when `TRELLO_CLI_READONLY`
-is set. **D** cannot be undone from this tool: it needs `--yes` and refuses a
-name prefix. Commands taking an object accept both `--thing` (a name) and
+Legend: **W** changes state on Trello and is refused when `TRELLO_CLI_READONLY`
+is set. It does not cover local files: `skills install` writes to disk and is
+not gated. **D** cannot be undone from this tool: it needs `--yes` and refuses
+a name prefix. Commands taking an object accept both `--thing` (a name) and
 `--thing-id` (an exact id); only the name form is listed.
+
+**Requires** lists what the command cannot run without. `--board` and `--list`
+can also be supplied by `TRELLO_CLI_BOARD` and `TRELLO_CLI_LIST`; every other
+required flag has to be passed.
 
 ## Global flags
 
@@ -95,6 +100,8 @@ No flags of its own.
 
 Show one board
 
+Requires: `--board`
+
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |
 | `--board` | string |  | board name, id, or shortLink |
@@ -129,7 +136,7 @@ Requires: `--card`
 
 Create a card in a list
 
-Requires: `--name`
+Requires: `--board`, `--list`, `--name`
 
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |
@@ -166,6 +173,8 @@ Requires: `--card`
 
 List cards on a board, or in one list
 
+Requires: `--board`
+
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |
 | `--all` | bool |  | include archived cards |
@@ -176,7 +185,7 @@ List cards on a board, or in one list
 
 Move a card to another list
 
-Requires: `--card`
+Requires: `--card`, `--list`
 
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |
@@ -297,6 +306,8 @@ Requires: `--card`, `--label`
 
 List the labels defined on a board
 
+Requires: `--board`
+
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |
 | `--board` | string |  | board name, id, or shortLink |
@@ -317,6 +328,8 @@ Requires: `--card`, `--label`
 
 Archive a list, or restore it with --restore
 
+Requires: `--board`, `--list`
+
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |
 | `--board` | string |  | board name, id, or shortLink |
@@ -327,7 +340,7 @@ Archive a list, or restore it with --restore
 
 Create a list on a board
 
-Requires: `--name`
+Requires: `--board`, `--name`
 
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |
@@ -338,6 +351,8 @@ Requires: `--name`
 ### `trello-cli lists list`
 
 List the lists on a board
+
+Requires: `--board`
 
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |
@@ -365,6 +380,8 @@ Requires: `--card`, `--member`
 ### `trello-cli members list`
 
 List the members of a board
+
+Requires: `--board`
 
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |

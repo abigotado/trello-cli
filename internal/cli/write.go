@@ -103,7 +103,7 @@ func (a *App) listsWriteCommands() []*cobra.Command {
 	create.Flags().StringVar(&name, "name", "", "list name")
 	create.Flags().StringVar(&pos, "pos", "", "position: top, bottom, or a number")
 
-	createCmd := a.newCommand(requires(mutating(create), "name"), func(ctx context.Context, _ *cobra.Command, _ []string) error {
+	createCmd := a.newCommand(requires(mutating(create), "board", "name"), func(ctx context.Context, _ *cobra.Command, _ []string) error {
 		if name == "" {
 			return errx.Usage("--name is required")
 		}
@@ -142,7 +142,7 @@ func (a *App) listsWriteCommands() []*cobra.Command {
 
 	// Archiving is reversible and Trello offers no list delete, so this is
 	// mutating but not destructive: requiring --yes here would be noise.
-	archiveCmd := a.newCommand(mutating(archive), func(ctx context.Context, _ *cobra.Command, _ []string) error {
+	archiveCmd := a.newCommand(requires(mutating(archive), "board", "list"), func(ctx context.Context, _ *cobra.Command, _ []string) error {
 		board, err := a.board(ctx, archiveBoardRef)
 		if err != nil {
 			return err
@@ -196,7 +196,7 @@ func (a *App) cardCreateCommand() *cobra.Command {
 	cmd.Flags().StringVar(&due, "due", "", "due date, ISO 8601")
 	cmd.Flags().StringVar(&pos, "pos", "", "position: top, bottom, or a number")
 
-	return a.newCommand(requires(mutating(cmd), "name"), func(ctx context.Context, c *cobra.Command, _ []string) error {
+	return a.newCommand(requires(mutating(cmd), "board", "list", "name"), func(ctx context.Context, c *cobra.Command, _ []string) error {
 		if name == "" {
 			return errx.Usage("--name is required")
 		}
@@ -312,7 +312,7 @@ func (a *App) cardMoveCommand() *cobra.Command {
 	listRef.bind(cmd, "list", "destination list name or id")
 	cmd.Flags().StringVar(&pos, "pos", "", "position in the destination: top, bottom, or a number")
 
-	return a.newCommand(requires(mutating(cmd), "card"), func(ctx context.Context, c *cobra.Command, _ []string) error {
+	return a.newCommand(requires(mutating(cmd), "card", "list"), func(ctx context.Context, c *cobra.Command, _ []string) error {
 		board, err := a.boardFor(ctx, boardRef, cardRef, listRef)
 		if err != nil {
 			return err

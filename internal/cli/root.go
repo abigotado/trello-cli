@@ -137,7 +137,15 @@ func (a *App) NewRootCommand() *cobra.Command {
 			}
 			return nil
 		}),
-		RunE: func(cmd *cobra.Command, _ []string) error { return cmd.Help() },
+		// Cobra's default is to print help and exit 0. That is the one
+		// combination a machine caller cannot survive: exit 0 says "succeeded,
+		// parse stdout", and stdout then holds usage prose instead of an
+		// envelope. Naming a command is the caller's mistake, so it is exit 2
+		// with an envelope like any other. --help still prints prose on stdout
+		// and exits 0; that is stated in the contract rather than papered over.
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return errx.Usage("%s needs a command", cmd.CommandPath())
+		},
 	}
 
 	flags := root.PersistentFlags()
