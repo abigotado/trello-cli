@@ -24,6 +24,16 @@ parsing loop. `--help` is the one exception: it is prose, for people.
 
 ## Install
 
+Homebrew, on macOS or Linux:
+
+```bash
+brew install --cask abigotado/tap/trello-cli
+```
+
+It is a cask rather than a formula because the release ships prebuilt binaries.
+Casks are no longer macOS-only — `binary` is a portable artifact — but Linux
+cask support landed in Homebrew 4.6, so `brew update` first if yours is older.
+
 Go 1.24.1 or newer:
 
 ```bash
@@ -44,9 +54,9 @@ and windows on amd64 and arm64. Each release carries a checksums file:
 shasum -a 256 -c trello-cli_VERSION_checksums.txt --ignore-missing
 ```
 
-There is no Homebrew formula. `trello-cli version` reports the build any of
-these produced, which is the first thing to include in a bug report. A download
-or a local checkout also reports the commit it was built from; a `go install`
+`trello-cli version` reports the build any of these produced, which is the first
+thing to include in a bug report. A download, a Homebrew install, or a local
+checkout also reports the commit it was built from; a `go install`
 build compiles the module zip, which carries no VCS history, so it reports its
 version and leaves `commit` empty.
 

@@ -74,7 +74,19 @@ jobs:
       - name: goreleaser check
         run: goreleaser check
 
+      # The Homebrew cask is pushed to abigotado/homebrew-tap, a different
+      # repository, which the built-in GITHUB_TOKEN cannot write to at any
+      # permission level — its scope ends at the repository containing this
+      # workflow. HOMEBREW_TAP_TOKEN is a fine-grained PAT scoped to that tap
+      # and nothing else.
+      #
+      # Ordering matters if it is ever missing or expired: goreleaser creates
+      # the GitHub release before it pushes the cask, so a token failure leaves
+      # a complete release with no cask rather than no release. Re-running this
+      # job on the same tag is the fix — replace_existing_artifacts and
+      # replace_existing_draft are set for exactly that.
       - name: goreleaser release
         run: goreleaser release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}

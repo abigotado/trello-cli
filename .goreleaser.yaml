@@ -54,6 +54,49 @@ checksum:
   name_template: "{{ .ProjectName }}_{{ .Version }}_checksums.txt"
   algorithm: sha256
 
+# A cask, not a formula. `brews:` is a hard deprecation as of goreleaser v2.16
+# and fails `goreleaser check` — which this pipeline runs before it releases, so
+# a formula config would abort the release rather than warn about it.
+#
+# A cask is not macOS-only, which is the part most guides still get wrong.
+# Homebrew's `binary` artifact is absent from MACOS_ONLY_ARTIFACTS, so the
+# on_linux block goreleaser emits is real and one entry covers darwin and linux
+# on both architectures. Windows is filtered out by the cask pipe and keeps
+# `go install` and the zip.
+homebrew_casks:
+  - name: trello-cli
+    ids: [trello-cli]
+    # Plural. Singular `binary:` is deprecated since v2.12.6 and fails check the
+    # same way `brews:` does.
+    binaries: [trello-cli]
+    homepage: https://github.com/abigotado/trello-cli
+    description: Manage Trello from the command line, or from an AI agent shelling out to it
+    # Matches release.prerelease below: an -rc tag should not move what
+    # `brew install` resolves to.
+    skip_upload: "auto"
+    repository:
+      owner: abigotado
+      name: homebrew-tap
+      # Not the workflow's built-in GITHUB_TOKEN: its permissions stop at the
+      # repository containing the workflow, so a cross-repo push returns 403.
+      # Being the same owner does not help. The fine-grained token this reads is
+      # scoped to homebrew-tap alone, so a credential sitting in CI for a year
+      # cannot reach this repository's source.
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    hooks:
+      post:
+        # Not optional. Homebrew quarantines everything a cask stages, and
+        # --no-quarantine was removed in brew 6.0.14. A quarantined,
+        # un-notarized binary is killed by the kernel on exec: verified against
+        # the v0.1.0 darwin/arm64 artifact, which exits 137 with zero bytes on
+        # both stdout and stderr. For a tool whose contract is "parse stdout,
+        # branch on the exit code", that is the worst possible failure, so a
+        # cask without this hook would be worse than shipping no cask at all.
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/trello-cli"]
+          end
+
 snapshot:
   version_template: "{{ incpatch .Version }}-next"
 
@@ -69,6 +112,12 @@ changelog:
 release:
   # Draft while the pipeline is young: the artifact list gets inspected before
   # it is public. Flip to false once it has proven itself.
+  #
+  # This now couples to Homebrew. The cask is pushed to the tap during the same
+  # run, pointing at release download URLs that stay 404 until the draft is
+  # published — so `brew install` is broken for the window between the tag and
+  # that click. Publish promptly, or set draft: false and accept that the
+  # artifact list goes public unreviewed.
   draft: true
   prerelease: auto
   # A tag is immutable, so a job that dies mid-upload must be re-runnable.
