@@ -34,6 +34,35 @@ func (r *objectRef) bind(cmd *cobra.Command, kind, help string) {
 	cmd.Flags().StringVar(&r.id, kind+"-id", "", "exact "+kind+" id, skipping name resolution")
 }
 
+// needsLookup reports whether ref can only be resolved by consulting the index.
+//
+// An id or an explicit --*-id needs nothing, which is what lets a command that
+// was given every object by id skip resolving a board it never uses.
+func (r objectRef) needsLookup() bool {
+	if r.id != "" {
+		return false
+	}
+	return r.name != "" && !resolve.LooksLikeID(r.name)
+}
+
+// boardFor resolves the board only when one of refs actually requires an index
+// lookup scoped to it.
+//
+// Without this, `labels add --card-id X --label-id Y` fails with "a board is
+// required" even though nothing in that call needs one — every object was
+// already addressed unambiguously.
+func (a *App) boardFor(ctx context.Context, boardRef objectRef, refs ...objectRef) (resolve.Object, error) {
+	if boardRef.id != "" || boardRef.name != "" {
+		return a.board(ctx, boardRef)
+	}
+	for _, ref := range refs {
+		if ref.needsLookup() {
+			return a.board(ctx, boardRef)
+		}
+	}
+	return resolve.Object{}, nil
+}
+
 // resolver builds the name resolver for this invocation.
 func (a *App) resolver(ctx context.Context) (*resolve.Resolver, error) {
 	if a.res != nil {
@@ -111,15 +140,17 @@ func (a *App) card(ctx context.Context, boardID string, ref objectRef) (resolve.
 	return r.Card(ctx, boardID, ref.name)
 }
 
-// withFreshIndex resolves an object and uses it, refreshing the index once if
-// the id turns out to be gone.
+// verify runs use against a resolved object, refreshing the index once if the
+// id turns out to be gone.
 //
-// This is what keeps a cache hit from ever being authoritative. An id read from
-// a stale index can name an object someone has since deleted; without the
-// retry the caller would get a not-found for a name that does exist.
-func withFreshIndex(
+// A cache hit must never be authoritative: an id read from a stale index can
+// name an object someone has since deleted, and without this the caller gets a
+// not-found for a name that does resolve live. It lives here rather than in
+// each command body because an opt-in safety rail is the same defect class as
+// a hand-built command that skips the confirmation gate — it works until the
+// one place someone forgets.
+func (a *App) verify(
 	ctx context.Context,
-	r *resolve.Resolver,
 	scope string,
 	resolveFn func(context.Context) (resolve.Object, error),
 	use func(context.Context, resolve.Object) error,
@@ -128,11 +159,10 @@ func withFreshIndex(
 	if err != nil {
 		return err
 	}
-	err = use(ctx, obj)
-	if err == nil || errx.ExitCode(err) != errx.CodeNotFound {
-		return err
+	if useErr := use(ctx, obj); useErr == nil || errx.ExitCode(useErr) != errx.CodeNotFound {
+		return useErr
 	}
-	r.Invalidate(scope)
+	a.invalidate(scope)
 	if obj, err = resolveFn(ctx); err != nil {
 		return err
 	}

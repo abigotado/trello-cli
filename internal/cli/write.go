@@ -36,12 +36,12 @@ type planView struct {
 	Action  string            `json:"action"`
 	Target  map[string]string `json:"target"`
 	Changes map[string]string `json:"changes,omitempty"`
-	DryRun  bool              `json:"dry_run"`
+	DryRun  bool              `json:"dryRun"`
 }
 
 func (p planView) Fields() []output.Field {
 	return []output.Field{
-		{Name: "dry_run", Value: "dry-run", Raw: true},
+		{Name: "dryRun", Value: "dry-run", Raw: true},
 		{Name: "action", Value: p.Action, Raw: p.Action},
 		{Name: "target", Value: kvText(p.Target), Raw: p.Target},
 		{Name: "changes", Value: kvText(p.Changes), Raw: p.Changes},
@@ -311,7 +311,7 @@ func (a *App) cardMoveCommand() *cobra.Command {
 	cmd.Flags().StringVar(&pos, "pos", "", "position in the destination: top, bottom, or a number")
 
 	return a.newCommand(mutating(cmd), func(ctx context.Context, c *cobra.Command, _ []string) error {
-		board, err := a.board(ctx, boardRef)
+		board, err := a.boardFor(ctx, boardRef, cardRef, listRef)
 		if err != nil {
 			return err
 		}
@@ -397,7 +397,7 @@ func (a *App) cardDeleteCommand() *cobra.Command {
 	cardRef.bind(cmd, "card", "card name, id, or shortLink")
 
 	return a.newCommand(destructive(cmd), func(ctx context.Context, _ *cobra.Command, _ []string) error {
-		obj, err := a.strictCard(ctx, boardRef, cardRef)
+		obj, boardID, err := a.strictCard(ctx, boardRef, cardRef)
 		if err != nil {
 			return err
 		}
@@ -411,34 +411,58 @@ func (a *App) cardDeleteCommand() *cobra.Command {
 		if err := client.DeleteCard(ctx, obj.ID); err != nil {
 			return err
 		}
-		board, boardErr := a.board(ctx, boardRef)
-		if boardErr == nil {
-			a.invalidate(resolve.CardScope(board.ID))
+		// The board id captured during resolution, not re-resolved: retrying
+		// a.board here failed whenever the card was given by id with no
+		// --board, leaving the deleted card in the index for the whole TTL.
+		if boardID != "" {
+			a.invalidate(resolve.CardScope(boardID))
 		}
 		return a.out.Success(deletedView{Kind: "card", ID: obj.ID})
 	})
 }
 
-// strictCard resolves a card for a destructive command, refusing a prefix.
-func (a *App) strictCard(ctx context.Context, boardRef, cardRef objectRef) (resolve.Object, error) {
+// strictCard resolves a card for a destructive command, refusing a prefix. It
+// also returns the board id it resolved within, so the caller can invalidate
+// that index without resolving again.
+func (a *App) strictCard(ctx context.Context, boardRef, cardRef objectRef) (resolve.Object, string, error) {
 	if cardRef.id != "" {
-		return resolve.Object{ID: cardRef.id}, nil
+		return resolve.Object{ID: cardRef.id}, "", nil
 	}
 	if cardRef.name == "" {
-		return resolve.Object{}, errx.Usage("a card is required: pass --card or --card-id")
+		return resolve.Object{}, "", errx.Usage("a card is required: pass --card or --card-id")
 	}
 	if resolve.LooksLikeID(cardRef.name) {
-		return resolve.Object{ID: cardRef.name}, nil
-	}
-	board, err := a.board(ctx, boardRef)
-	if err != nil {
-		return resolve.Object{}, err
+		return resolve.Object{ID: cardRef.name}, "", nil
 	}
 	r, err := a.strictResolver(ctx)
 	if err != nil {
-		return resolve.Object{}, err
+		return resolve.Object{}, "", err
 	}
-	return r.Card(ctx, board.ID, cardRef.name)
+	// The board is resolved strictly too. Refusing a prefix for the card while
+	// accepting one for the board still deletes from whichever board the
+	// prefix happened to hit — "Prod" matching "Production" is exactly the
+	// mistake this command exists to prevent.
+	board, err := a.strictBoard(ctx, boardRef, r)
+	if err != nil {
+		return resolve.Object{}, "", err
+	}
+	card, err := r.Card(ctx, board.ID, cardRef.name)
+	return card, board.ID, err
+}
+
+// strictBoard resolves a board without the prefix rung.
+func (a *App) strictBoard(ctx context.Context, ref objectRef, r *resolve.Resolver) (resolve.Object, error) {
+	if ref.id != "" {
+		return resolve.Object{ID: ref.id}, nil
+	}
+	query := ref.name
+	if query == "" {
+		query = a.cfg.DefaultBoard
+	}
+	if query == "" {
+		return resolve.Object{}, errx.Usage("a board is required: pass --board, --board-id, or set TRELLO_CLI_BOARD")
+	}
+	return r.Board(ctx, query)
 }
 
 type deletedView struct {
@@ -465,7 +489,7 @@ func (a *App) labelsWriteCommands() []*cobra.Command {
 		labelRef.bind(cmd, "label", "label name or color")
 
 		return a.newCommand(mutating(cmd), func(ctx context.Context, _ *cobra.Command, _ []string) error {
-			board, err := a.board(ctx, boardRef)
+			board, err := a.boardFor(ctx, boardRef, cardRef, labelRef)
 			if err != nil {
 				return err
 			}
@@ -516,7 +540,7 @@ func (a *App) membersWriteCommands() []*cobra.Command {
 		memberRef.bind(cmd, "member", "member username or id")
 
 		return a.newCommand(mutating(cmd), func(ctx context.Context, _ *cobra.Command, _ []string) error {
-			board, err := a.board(ctx, boardRef)
+			board, err := a.boardFor(ctx, boardRef, cardRef, memberRef)
 			if err != nil {
 				return err
 			}
@@ -619,11 +643,12 @@ func (a *App) checklistsWriteCommands() []*cobra.Command {
 		return a.out.Success(checklistView{created})
 	})
 
-	var itemBoardRef, itemCardRef objectRef
 	var checklistID, itemName string
+	// No --board or --card here on purpose. They were bound and never read,
+	// which is worse than absent: a caller passing them to guard against a
+	// checklist id from the wrong card got no guard at all. The checklist id
+	// already identifies its card unambiguously.
 	addItem := &cobra.Command{Use: "add-item", Short: "Add an item to a checklist", Args: cobra.NoArgs}
-	itemBoardRef.bind(addItem, "board", "board to resolve the card name within")
-	itemCardRef.bind(addItem, "card", "card name, id, or shortLink")
 	addItem.Flags().StringVar(&checklistID, "checklist-id", "", "checklist id, from 'checklists list'")
 	addItem.Flags().StringVar(&itemName, "name", "", "item text")
 
@@ -723,15 +748,15 @@ func (a *App) attachmentsWriteCommands() []*cobra.Command {
 // changedView reports a relationship change that returns no useful body.
 type changedView struct {
 	Action   string `json:"action"`
-	CardID   string `json:"card_id"`
-	TargetID string `json:"target_id"`
+	CardID   string `json:"cardId"`
+	TargetID string `json:"targetId"`
 }
 
 func (c changedView) Fields() []output.Field {
 	return []output.Field{
 		{Name: "action", Value: c.Action, Raw: c.Action},
-		{Name: "card_id", Value: c.CardID, Raw: c.CardID},
-		{Name: "target_id", Value: c.TargetID, Raw: c.TargetID},
+		{Name: "cardId", Value: c.CardID, Raw: c.CardID},
+		{Name: "targetId", Value: c.TargetID, Raw: c.TargetID},
 	}
 }
 

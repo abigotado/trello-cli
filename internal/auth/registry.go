@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"sort"
 
+	"github.com/abigotado/trello-cli/internal/lockfile"
+
 	"github.com/abigotado/trello-cli/internal/errx"
 )
 
@@ -24,6 +26,9 @@ type Registry struct {
 	path   string
 	loaded bool
 	data   registryFile
+	// removed records names this invocation dropped, so merging with a
+	// concurrent writer's copy does not bring them back.
+	removed map[string]bool
 }
 
 type registryFile struct {
@@ -113,6 +118,10 @@ func (r *Registry) Remove(name string) error {
 		}
 	}
 	r.data.Accounts = kept
+	if r.removed == nil {
+		r.removed = map[string]bool{}
+	}
+	r.removed[name] = true
 	if r.data.Default == name {
 		r.data.Default = ""
 		// Falling back to the only remaining account keeps the tool usable
@@ -145,6 +154,33 @@ func candidateAccounts(names []string) []errx.Candidate {
 	return out
 }
 
+// mergeFromDisk folds in any account another invocation added since this one
+// loaded. Removals are this invocation's intent and are not undone.
+func (r *Registry) mergeFromDisk() {
+	raw, err := os.ReadFile(r.path)
+	if err != nil {
+		return
+	}
+	var onDisk registryFile
+	if json.Unmarshal(raw, &onDisk) != nil || onDisk.Version != registryVersion {
+		return
+	}
+	known := make(map[string]bool, len(r.data.Accounts))
+	for _, a := range r.data.Accounts {
+		known[a] = true
+	}
+	for _, a := range onDisk.Accounts {
+		// removed holds names this invocation deliberately dropped, so a
+		// concurrent writer's copy does not resurrect them.
+		if !known[a] && !r.removed[a] {
+			r.data.Accounts = append(r.data.Accounts, a)
+		}
+	}
+	if r.data.Default == "" && onDisk.Default != "" && !r.removed[onDisk.Default] {
+		r.data.Default = onDisk.Default
+	}
+}
+
 func (r *Registry) load() {
 	if r.loaded {
 		return
@@ -163,14 +199,35 @@ func (r *Registry) load() {
 	r.data = onDisk
 }
 
-// save writes the registry atomically, for the same reason the resolver cache
-// does: two invocations can log in at the same moment.
+// save merges with whatever is on disk, then writes atomically.
+//
+// Atomic rename alone prevents a torn file, not a lost update: two logins that
+// both load an empty registry would each write only their own account, and the
+// second would erase the first. That is not a cache miss — the keychain entry
+// survives while the name vanishes, so `auth list` hides it and the sole-account
+// rung silently starts selecting a different workspace. Merging on write is
+// what makes concurrent logins safe.
 func (r *Registry) save() error {
 	dir := filepath.Dir(r.path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return errx.Internal("create %s: %v", dir, err)
 	}
-	r.data.Version = registryVersion
+	// Merge and write under one lock. Merging alone still loses an update,
+	// because the merge is itself a read followed by a write.
+	var writeErr error
+	lockErr := lockfile.With(r.path, func() error {
+		r.mergeFromDisk()
+		r.data.Version = registryVersion
+		writeErr = r.write(dir)
+		return nil
+	})
+	if lockErr != nil {
+		return errx.Internal("lock account registry: %v", lockErr)
+	}
+	return writeErr
+}
+
+func (r *Registry) write(dir string) error {
 	raw, err := json.MarshalIndent(r.data, "", "  ")
 	if err != nil {
 		return errx.Internal("encode account registry: %v", err)

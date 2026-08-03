@@ -13,6 +13,7 @@ import (
 	"github.com/abigotado/trello-cli/internal/auth"
 	"github.com/abigotado/trello-cli/internal/errx"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 )
 
 // harness runs the real command tree against injected streams, environment,
@@ -369,14 +370,44 @@ func TestAuthLoginStoresTheGivenCredentials(t *testing.T) {
 	}
 }
 
-func TestAuthLoginDryRunDoesNotStore(t *testing.T) {
-	store := &fakeStore{}
-	h := newHarness(t, nil, store)
-	if got := h.run("--dry-run", "auth", "login", "--api-key", "k", "--token", "t"); got != errx.CodeOK {
-		t.Fatalf("exit code = %d, want 0", got)
+// A dry run of a credential write must be distinguishable from a real one on
+// stdout alone. Returning the success shape with "authenticated": true is the
+// one place a false "it worked" would be most costly.
+func TestAuthDryRunIsDistinguishableFromSuccess(t *testing.T) {
+	tests := []struct {
+		name   string
+		args   []string
+		action string
+	}{
+		{"login", []string{"--dry-run", "auth", "login", "--api-key", "k", "--token", "t"}, "auth login"},
+		{"logout", []string{"--dry-run", "auth", "logout"}, "auth logout"},
 	}
-	if store.saved != nil {
-		t.Error("--dry-run wrote credentials to the store")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := &fakeStore{creds: auth.Credentials{APIKey: "k", Token: "t"}}
+			h := newHarness(t, nil, store)
+			if got := h.run(tt.args...); got != errx.CodeOK {
+				t.Fatalf("exit code = %d, want 0\nstderr: %s", got, h.err())
+			}
+			if store.saved != nil || store.deleted {
+				t.Error("--dry-run touched the credential store")
+			}
+			var env struct {
+				Data struct {
+					DryRun bool   `json:"dryRun"`
+					Action string `json:"action"`
+				} `json:"data"`
+			}
+			if err := json.Unmarshal([]byte(h.out()), &env); err != nil {
+				t.Fatalf("bad envelope: %v\n%s", err, h.out())
+			}
+			if !env.Data.DryRun {
+				t.Errorf("stdout does not mark this as a dry run:\n%s", h.out())
+			}
+			if env.Data.Action != tt.action {
+				t.Errorf("action = %q, want %q", env.Data.Action, tt.action)
+			}
+		})
 	}
 }
 
@@ -726,7 +757,7 @@ func TestDryRunResolvesNamesAndSendsNoMutation(t *testing.T) {
 			}
 			var env struct {
 				Data struct {
-					DryRun bool              `json:"dry_run"`
+					DryRun bool              `json:"dryRun"`
 					Action string            `json:"action"`
 					Target map[string]string `json:"target"`
 				} `json:"data"`
@@ -904,7 +935,7 @@ func TestAuthListEnumeratesAccountsAndMarksTheDefault(t *testing.T) {
 			Account       string `json:"account"`
 			Default       bool   `json:"default"`
 			Authenticated bool   `json:"authenticated"`
-			Fingerprint   string `json:"token_fingerprint"`
+			Fingerprint   string `json:"tokenFingerprint"`
 		} `json:"data"`
 		Meta *struct {
 			Count int `json:"count"`
@@ -976,11 +1007,14 @@ func TestAccountFlagSelectsCredentialsForDataCommands(t *testing.T) {
 }
 
 // An account the caller named explicitly must be reported by name, not as a
-// generic "not authenticated" the caller cannot act on.
+// generic "not authenticated" the caller cannot act on. The code is auth, not
+// not-found: the recovery is always "run auth login", the same as every other
+// missing-credential case, and two codes for one recovery would make an agent
+// branch on an implementation detail.
 func TestUnknownAccountIsReportedByName(t *testing.T) {
 	h := newHarness(t, nil, &fakeStore{})
-	if got := h.run("--account", "ghost", "me"); got != errx.CodeNotFound {
-		t.Fatalf("exit code = %d, want %d\n%s", got, errx.CodeNotFound, h.out())
+	if got := h.run("--account", "ghost", "me"); got != errx.CodeAuth {
+		t.Fatalf("exit code = %d, want %d\n%s", got, errx.CodeAuth, h.out())
 	}
 	var env struct {
 		Error struct {
@@ -1009,6 +1043,102 @@ func TestThereIsNoStatefulAccountSwitch(t *testing.T) {
 		if got := h.run(args...); got != errx.CodeUsage {
 			t.Errorf("%v exit code = %d, want %d: account selection must stay per-invocation",
 				args, got, errx.CodeUsage)
+		}
+	}
+}
+
+// cobra writes a bound flag straight into the variable behind it, so binding
+// one objectRef to two subcommands makes them alias each other's parsed value.
+// It is invisible while one command runs per process and becomes a wrong-target
+// bug the moment that stops being true.
+func TestNoObjectRefIsSharedBetweenSubcommands(t *testing.T) {
+	app := NewApp()
+	root := app.NewRootCommand()
+
+	// Map every flag's underlying value pointer to the commands that bind it.
+	owners := map[any][]string{}
+	var walk func(*cobra.Command)
+	walk = func(c *cobra.Command) {
+		c.Flags().VisitAll(func(f *pflag.Flag) {
+			if c.HasSubCommands() {
+				return // group commands hold no target flags of their own
+			}
+			key := any(f.Value)
+			owners[key] = append(owners[key], c.CommandPath()+" --"+f.Name)
+		})
+		for _, sub := range c.Commands() {
+			walk(sub)
+		}
+	}
+	for _, sub := range root.Commands() {
+		walk(sub)
+	}
+
+	for _, paths := range owners {
+		if len(paths) > 1 {
+			t.Errorf("one flag value is shared by %v", paths)
+		}
+	}
+}
+
+// Refusing a prefix for the card while accepting one for the board still
+// deletes from whichever board the prefix happened to hit.
+func TestDeleteRefusesAPrefixBoardToo(t *testing.T) {
+	stub := newWriteStub(t)
+	h := writeHarness(t, stub, nil)
+
+	// "Road" prefix-matches both Roadmap and Roadmap 2026.
+	got := h.run("cards", "delete", "--board", "Road", "--card", "Ship it", "--yes")
+	if got == errx.CodeOK {
+		t.Fatal("a prefix board was accepted for a destructive command")
+	}
+	if len(stub.mutations) != 0 {
+		t.Errorf("a refused delete still sent %v", stub.mutations)
+	}
+}
+
+// Every object was addressed unambiguously, so demanding a board the call
+// never uses is pure friction.
+func TestIdOnlyInvocationsDoNotDemandABoard(t *testing.T) {
+	tests := [][]string{
+		{"labels", "add", "--card-id", "000000000000000000000020", "--label-id", "000000000000000000000030"},
+		{"labels", "remove", "--card-id", "000000000000000000000020", "--label-id", "000000000000000000000030"},
+		{"members", "assign", "--card-id", "000000000000000000000020", "--member-id", "000000000000000000000040"},
+		{"cards", "move", "--card-id", "000000000000000000000020", "--list-id", "000000000000000000000011"},
+	}
+	for _, args := range tests {
+		t.Run(strings.Join(args[:2], " "), func(t *testing.T) {
+			stub := newWriteStub(t)
+			h := writeHarness(t, stub, nil)
+			if got := h.run(args...); got != errx.CodeOK {
+				t.Errorf("exit code = %d, want 0; nothing here needs a board\nstdout: %s", got, h.out())
+			}
+		})
+	}
+}
+
+// Flags that are bound and never read are worse than absent: a caller passing
+// them to guard against a wrong target gets no guard at all.
+func TestChecklistAddItemHasNoUnusedFlags(t *testing.T) {
+	app := NewApp()
+	root := app.NewRootCommand()
+	var addItem *cobra.Command
+	for _, g := range root.Commands() {
+		if g.Name() != "checklists" {
+			continue
+		}
+		for _, sub := range g.Commands() {
+			if sub.Name() == "add-item" {
+				addItem = sub
+			}
+		}
+	}
+	if addItem == nil {
+		t.Fatal("checklists add-item not found")
+	}
+	for _, unused := range []string{"board", "card"} {
+		if addItem.Flags().Lookup(unused) != nil {
+			t.Errorf("--%s is bound on checklists add-item but nothing reads it", unused)
 		}
 	}
 }

@@ -508,3 +508,50 @@ func readFile(path string) (string, error) {
 	b, err := os.ReadFile(path)
 	return string(b), err
 }
+
+// Losing an account name is not a cache miss: the keychain entry survives while
+// the name vanishes, so `auth list` hides it and the sole-account rung silently
+// starts selecting a different workspace.
+func TestConcurrentLoginsDoNotLoseAnAccount(t *testing.T) {
+	isolateConfigDir(t)
+
+	// Both instances load before either saves, which is exactly what two
+	// concurrent `auth login` invocations do.
+	first, second := NewRegistry(), NewRegistry()
+	first.List()
+	second.List()
+
+	if err := first.Add("work"); err != nil {
+		t.Fatalf("Add(work): %v", err)
+	}
+	if err := second.Add("personal"); err != nil {
+		t.Fatalf("Add(personal): %v", err)
+	}
+
+	got := NewRegistry().List()
+	if len(got) != 2 {
+		t.Errorf("List() = %v, want both accounts to survive", got)
+	}
+}
+
+// A removal is this invocation's intent and must not be undone by merging with
+// a concurrent writer's older copy.
+func TestRemovalIsNotResurrectedByMerge(t *testing.T) {
+	isolateConfigDir(t)
+	seed := NewRegistry()
+	for _, n := range []string{"work", "personal"} {
+		if err := seed.Add(n); err != nil {
+			t.Fatalf("Add: %v", err)
+		}
+	}
+
+	remover := NewRegistry()
+	remover.List() // load the pre-removal snapshot
+	if err := remover.Remove("work"); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+
+	if got := NewRegistry().List(); len(got) != 1 || got[0] != "personal" {
+		t.Errorf("List() = %v, want only personal", got)
+	}
+}

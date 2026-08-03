@@ -19,6 +19,7 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -160,7 +161,10 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 			if ctx.Err() != nil {
 				return errx.Translate(ctx.Err())
 			}
-			lastErr = errx.Retryable("NETWORK", 0, "%s %s: %v", method, path, redact(err)).Wrap(err)
+			// Deliberately not .Wrap(err): a *url.Error carries the full URL
+			// including both credentials, and output's untyped-error fallback
+			// prints err.Error() verbatim. The redacted message is kept.
+			lastErr = errx.Retryable("NETWORK", 0, "%s %s: %v", method, path, redact(err))
 			// A transport error means the request may or may not have reached
 			// the server. Replaying a POST there could create a second card,
 			// and a duplicate is worse than a reported failure the caller can
@@ -271,6 +275,11 @@ func (c *Client) handle(resp *http.Response, method, path string, out any) (time
 	// text/plain body, so this must never assume a decodable envelope.
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
 	apiCode, message := parseAPIError(raw)
+	// The body is not Trello's to control. Any proxy, WAF, or gateway in the
+	// path may echo the request URI, and Trello takes the key and token as
+	// query parameters — so an nginx or Cloudflare 403 page puts live
+	// credentials straight into error.message, which is printed on stdout.
+	message = ScrubSecrets(message)
 
 	switch {
 	case resp.StatusCode == http.StatusUnauthorized, resp.StatusCode == http.StatusForbidden:
@@ -438,6 +447,18 @@ func redact(err error) string {
 		msg = strings.ReplaceAll(msg, uerr.URL, RedactURL(uerr.URL))
 	}
 	return msg
+}
+
+// secretParam matches a key or token query parameter and its value, wherever
+// it appears in free text.
+var secretParam = regexp.MustCompile(`(?i)\b(key|token)=([^&\s"']+)`)
+
+// ScrubSecrets removes credential query parameters from arbitrary text.
+//
+// RedactURL only helps when the whole string parses as a URL. This handles the
+// case that actually leaks: a credential embedded in a server's prose.
+func ScrubSecrets(s string) string {
+	return secretParam.ReplaceAllString(s, "$1=REDACTED")
 }
 
 // RedactURL replaces the key and token query values with a placeholder.

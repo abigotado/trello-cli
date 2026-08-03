@@ -123,7 +123,15 @@ func DefaultFormat(stdout *os.File) Format {
 
 // Success renders a successful result. data may be a Renderable, a slice of
 // Renderable, or any JSON-marshalable value.
-func (w *Writer) Success(data any) error {
+func (w *Writer) Success(data any) error { return w.success(data, false) }
+
+// SuccessPage renders a collection that may not be complete.
+//
+// A command that applied a limit cannot report meta.truncated:false honestly —
+// a caller would read it as "this is everything" and stop paging.
+func (w *Writer) SuccessPage(data any, truncated bool) error { return w.success(data, truncated) }
+
+func (w *Writer) success(data any, truncated bool) error {
 	switch w.Format {
 	case FormatText:
 		return w.renderText(data)
@@ -146,7 +154,7 @@ func (w *Writer) Success(data any) error {
 		// the contract dump, so an agent can use its presence as a reliable
 		// signal instead of having to know which commands return lists.
 		if rows, collection, ok := asRows(data); ok && collection {
-			env.Meta = &Meta{Count: len(rows)}
+			env.Meta = &Meta{Count: len(rows), Truncated: truncated}
 		}
 		return w.encode(env)
 	}

@@ -273,7 +273,12 @@ func (r Resolver) fromStore(ctx context.Context, account string, explicit bool) 
 			// The caller named this account, so say that it specifically is
 			// missing rather than reporting a generic "not authenticated".
 			return Resolution{}, &errx.Error{
-				Code:       errx.CodeNotFound,
+				// Auth, not NotFound. The caller's recovery is always "run
+				// auth login", which is code 5's stated action; the sibling
+				// notConfigured() path returns 5 for the same condition
+				// reached implicitly, and two codes for one recovery makes an
+				// agent special-case an implementation detail.
+				Code:       errx.CodeAuth,
 				Reason:     "UNKNOWN_ACCOUNT",
 				Message:    "no credentials are stored for account " + account,
 				Hint:       "run 'trello-cli auth login --account " + account + "', or 'trello-cli auth list' to see the accounts you have",

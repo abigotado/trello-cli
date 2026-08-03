@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -296,6 +297,64 @@ func TestIsIdempotent(t *testing.T) {
 		t.Run(tt.method, func(t *testing.T) {
 			if got := isIdempotent(tt.method); got != tt.want {
 				t.Errorf("isIdempotent(%s) = %v, want %v", tt.method, got, tt.want)
+			}
+		})
+	}
+}
+
+// The response body is not Trello's to control: a proxy, WAF, or gateway in
+// the path may echo the request URI, and Trello takes the key and token as
+// query parameters. Without scrubbing, an nginx or Cloudflare 403 page puts
+// live credentials into error.message, which is printed on stdout.
+func TestErrorBodyCannotLeakCredentials(t *testing.T) {
+	tests := []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{"proxy 403 echoing the uri", http.StatusForbidden, "403 Forbidden: /members/me?key=SECRETKEY&token=SECRETTOKEN"},
+		{"gateway 502 echoing the uri", http.StatusBadGateway, "upstream failed for /1/cards?key=SECRETKEY&token=SECRETTOKEN"},
+		{"json error echoing the uri", http.StatusBadRequest, `{"message":"bad request for /1/cards?key=SECRETKEY&token=SECRETTOKEN"}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tt.status)
+				_, _ = w.Write([]byte(tt.body))
+			}))
+			defer srv.Close()
+
+			c := New(srv.URL, Credentials{APIKey: "SECRETKEY", Token: "SECRETTOKEN"}, 1,
+				WithHTTPClient(srv.Client()),
+				WithSleep(func(context.Context, time.Duration) error { return nil }),
+				WithJitter(func(d time.Duration) time.Duration { return d }),
+			)
+			_, err := c.Me(context.Background())
+			if err == nil {
+				t.Fatal("expected an error")
+			}
+			for _, secret := range []string{"SECRETKEY", "SECRETTOKEN"} {
+				if strings.Contains(err.Error(), secret) {
+					t.Errorf("error message leaked %s:\n%s", secret, err.Error())
+				}
+			}
+		})
+	}
+}
+
+func TestScrubSecrets(t *testing.T) {
+	tests := []struct{ in, want string }{
+		{"key=abc&token=def", "key=REDACTED&token=REDACTED"},
+		{"?fields=id&key=abc", "?fields=id&key=REDACTED"},
+		{"TOKEN=abc", "TOKEN=REDACTED"},
+		{"no secrets here", "no secrets here"},
+		// A field merely ending in "key" is not a credential parameter.
+		{"idList=abc", "idList=abc"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.in, func(t *testing.T) {
+			if got := ScrubSecrets(tt.in); got != tt.want {
+				t.Errorf("ScrubSecrets(%q) = %q, want %q", tt.in, got, tt.want)
 			}
 		})
 	}

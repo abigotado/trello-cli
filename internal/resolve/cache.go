@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/abigotado/trello-cli/internal/lockfile"
 )
 
 // cacheVersion is bumped when the on-disk shape changes. A file with a
@@ -31,6 +33,9 @@ type Cache struct {
 
 	loaded bool
 	data   cacheFile
+	// dropped records scopes invalidated here, so merging with a concurrent
+	// writer's copy does not restore an entry we just proved stale.
+	dropped map[string]bool
 }
 
 type cacheFile struct {
@@ -102,6 +107,10 @@ func (c *Cache) Invalidate(scope string) {
 		return
 	}
 	delete(c.data.Entries, scope)
+	if c.dropped == nil {
+		c.dropped = map[string]bool{}
+	}
+	c.dropped[scope] = true
 	c.save()
 }
 
@@ -126,6 +135,27 @@ func (c *Cache) Path() string {
 	return c.path
 }
 
+// mergeFromDisk folds in scopes another invocation wrote since this one
+// loaded, preferring whichever entry is fresher.
+func (c *Cache) mergeFromDisk() {
+	raw, err := os.ReadFile(c.path)
+	if err != nil {
+		return
+	}
+	var onDisk cacheFile
+	if json.Unmarshal(raw, &onDisk) != nil || onDisk.Version != cacheVersion {
+		return
+	}
+	for scope, entry := range onDisk.Entries {
+		if c.dropped[scope] {
+			continue // invalidated here on purpose; do not resurrect it
+		}
+		if mine, ok := c.data.Entries[scope]; !ok || entry.FetchedAt.After(mine.FetchedAt) {
+			c.data.Entries[scope] = entry
+		}
+	}
+}
+
 func (c *Cache) load() {
 	if c.loaded {
 		return
@@ -148,12 +178,13 @@ func (c *Cache) load() {
 	}
 }
 
-// save writes the cache atomically.
+// save merges with whatever is on disk, then writes atomically.
 //
-// Temp file in the same directory plus rename, so a second invocation running
-// concurrently either sees the old file or the new one, never a half-written
-// one. Last writer wins, which is correct for a cache: both wrote something
-// they had just fetched.
+// Rename alone makes the file never torn, but it does not make the write
+// per-entry: two invocations resolving different scopes would each rewrite the
+// whole file from their own snapshot and discard the other's entry. Merging
+// keeps both. Within one scope the last writer still wins, which is correct —
+// both had just fetched it.
 func (c *Cache) save() {
 	if c.Disabled() {
 		return
@@ -162,6 +193,16 @@ func (c *Cache) save() {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return
 	}
+	// Merge and write under one lock, so two invocations resolving different
+	// scopes cannot interleave read-modify-write and drop each other's entry.
+	_ = lockfile.With(c.path, func() error {
+		c.mergeFromDisk()
+		c.write(dir)
+		return nil
+	})
+}
+
+func (c *Cache) write(dir string) {
 	raw, err := json.Marshal(c.data)
 	if err != nil {
 		return

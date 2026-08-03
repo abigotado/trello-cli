@@ -75,18 +75,14 @@ func (a *App) newBoardsCommand() *cobra.Command {
 		if err != nil {
 			return err
 		}
-		r, err := a.resolver(ctx)
-		if err != nil {
-			return err
-		}
 		var board trello.Board
-		err = withFreshIndex(ctx, r, resolve.BoardScope(),
+		if err := a.verify(ctx, resolve.BoardScope(),
 			func(ctx context.Context) (resolve.Object, error) { return a.board(ctx, ref) },
 			func(ctx context.Context, obj resolve.Object) error {
-				board, err = client.Board(ctx, obj.ID)
-				return err
-			})
-		if err != nil {
+				var getErr error
+				board, getErr = client.Board(ctx, obj.ID)
+				return getErr
+			}); err != nil {
 			return err
 		}
 		return a.out.Success(boardView{board})
@@ -111,18 +107,14 @@ func (a *App) newListsCommand() *cobra.Command {
 		if err != nil {
 			return err
 		}
-		r, err := a.resolver(ctx)
-		if err != nil {
-			return err
-		}
 		var lists []trello.List
-		err = withFreshIndex(ctx, r, resolve.BoardScope(),
+		if err := a.verify(ctx, resolve.BoardScope(),
 			func(ctx context.Context) (resolve.Object, error) { return a.board(ctx, boardRef) },
 			func(ctx context.Context, obj resolve.Object) error {
-				lists, err = client.Lists(ctx, obj.ID, includeClosed)
-				return err
-			})
-		if err != nil {
+				var listErr error
+				lists, listErr = client.Lists(ctx, obj.ID, includeClosed)
+				return listErr
+			}); err != nil {
 			return err
 		}
 		views := make([]listView, 0, len(lists))
@@ -135,7 +127,12 @@ func (a *App) newListsCommand() *cobra.Command {
 }
 
 func (a *App) newCardsCommand() *cobra.Command {
-	var boardRef, listRef, cardRef objectRef
+	// One objectRef per subcommand, never shared. cobra writes a bound flag
+	// straight into the variable, so binding one ref to two commands makes
+	// them alias each other's parsed value the moment more than one command
+	// runs in a process.
+	var listBoardRef, listRef objectRef
+	var getBoardRef, cardRef objectRef
 	var includeClosed bool
 
 	list := &cobra.Command{
@@ -143,7 +140,7 @@ func (a *App) newCardsCommand() *cobra.Command {
 		Short: "List cards on a board, or in one list",
 		Args:  cobra.NoArgs,
 	}
-	boardRef.bind(list, "board", "board name, id, or shortLink")
+	listBoardRef.bind(list, "board", "board name, id, or shortLink")
 	listRef.bind(list, "list", "restrict to one list, by name or id")
 	list.Flags().BoolVar(&includeClosed, "all", false, "include archived cards")
 
@@ -152,7 +149,7 @@ func (a *App) newCardsCommand() *cobra.Command {
 		if err != nil {
 			return err
 		}
-		board, err := a.board(ctx, boardRef)
+		board, err := a.board(ctx, listBoardRef)
 		if err != nil {
 			return err
 		}
@@ -164,7 +161,10 @@ func (a *App) newCardsCommand() *cobra.Command {
 		}
 
 		var cards []trello.Card
-		if listRef.empty() {
+		// a.list falls back to TRELLO_CLI_LIST, so checking empty() directly
+		// would give one env var two meanings: honoured by cards create and
+		// silently ignored here.
+		if listRef.empty() && a.cfg.DefaultList == "" {
 			cards, err = client.CardsOnBoard(ctx, board.ID, includeClosed)
 		} else {
 			var target resolve.Object
@@ -187,7 +187,7 @@ func (a *App) newCardsCommand() *cobra.Command {
 		Short: "Show one card",
 		Args:  cobra.NoArgs,
 	}
-	boardRef.bind(get, "board", "board to resolve the card name within")
+	getBoardRef.bind(get, "board", "board to resolve the card name within")
 	cardRef.bind(get, "card", "card name, id, or shortLink")
 
 	getCmd := a.newCommand(get, func(ctx context.Context, _ *cobra.Command, _ []string) error {
@@ -195,7 +195,7 @@ func (a *App) newCardsCommand() *cobra.Command {
 		if err != nil {
 			return err
 		}
-		obj, err := a.cardAnywhere(ctx, boardRef, cardRef)
+		obj, err := a.cardAnywhere(ctx, getBoardRef, cardRef)
 		if err != nil {
 			return err
 		}
@@ -204,11 +204,16 @@ func (a *App) newCardsCommand() *cobra.Command {
 			return err
 		}
 		view := cardView{Card: card}
-		// Only worth another request when the caller gave a board to resolve
-		// within; a bare card id should stay a single round trip.
-		if !boardRef.empty() || a.cfg.DefaultBoard != "" {
-			if board, err := a.board(ctx, boardRef); err == nil {
-				if names, err := a.listNames(ctx, board.ID); err == nil {
+		// Only when the caller named a board on this invocation. Including the
+		// configured default here cost two extra requests on every
+		// `cards get --card-id X`, to label the card with a list from a board
+		// it may not even be on — the opposite of the comment that used to sit
+		// here. Errors are ignored deliberately: the label is a convenience,
+		// and failing the whole read because it could not be fetched would be
+		// worse than omitting it.
+		if !getBoardRef.empty() {
+			if board, boardErr := a.board(ctx, getBoardRef); boardErr == nil {
+				if names, nameErr := a.listNames(ctx, board.ID); nameErr == nil {
 					view.listName = names[card.IDList]
 				}
 			}
@@ -303,7 +308,10 @@ func (a *App) newCommentsCommand() *cobra.Command {
 		for _, c := range comments {
 			views = append(views, commentView{c})
 		}
-		return a.out.Success(views)
+		// A page that came back exactly full is the only signal Trello gives
+		// that more may exist. Reporting truncated:false there would tell the
+		// caller it had everything.
+		return a.out.SuccessPage(views, limit > 0 && len(comments) == limit)
 	})
 	return group("comments", "Work with card comments", append([]*cobra.Command{sub}, a.commentsWriteCommands()...)...)
 }
@@ -389,7 +397,8 @@ func (a *App) newSearchCommand() *cobra.Command {
 		for _, c := range results.Cards {
 			views = append(views, searchHitView{Kind: "card", ID: c.ID, ShortLink: c.ShortLink, Name: c.Name, URL: c.URL})
 		}
-		return a.out.Success(views)
+		truncated := limit > 0 && (len(results.Boards) == limit || len(results.Cards) == limit)
+		return a.out.SuccessPage(views, truncated)
 	})
 }
 

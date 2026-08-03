@@ -82,3 +82,24 @@ func TestConfigDoesNotImportAuth(t *testing.T) {
 		}
 	}
 }
+
+// resolve turns names into ids; rendering belongs to internal/output. If it
+// could import output, resolution results would start carrying display logic
+// and the resolver would stop being testable without a writer.
+func TestResolveDoesNotImportOutput(t *testing.T) {
+	for _, dep := range deps(t, module+"/internal/resolve") {
+		if dep == module+"/internal/output" {
+			t.Error("internal/resolve imports internal/output; it must not render user-facing text")
+		}
+	}
+}
+
+// resolve sits below cli. The compiler already rejects the cycle, but stating
+// it keeps the intended direction explicit alongside the other invariants.
+func TestResolveDoesNotImportCLI(t *testing.T) {
+	for _, dep := range deps(t, module+"/internal/resolve") {
+		if dep == module+"/internal/cli" {
+			t.Error("internal/resolve imports internal/cli")
+		}
+	}
+}

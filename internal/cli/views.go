@@ -33,8 +33,8 @@ type accountView struct {
 	Account       string      `json:"account,omitempty"`
 	Authenticated bool        `json:"authenticated"`
 	Source        auth.Source `json:"source"`
-	APIKeySuffix  string      `json:"api_key_suffix,omitempty"`
-	Fingerprint   string      `json:"token_fingerprint,omitempty"`
+	APIKeySuffix  string      `json:"apiKeySuffix,omitempty"`
+	Fingerprint   string      `json:"tokenFingerprint,omitempty"`
 	Default       bool        `json:"default"`
 }
 
@@ -52,8 +52,8 @@ func (s accountView) Fields() []output.Field {
 		{Name: "default", Value: marker, Raw: s.Default},
 		{Name: "authenticated", Value: state, Raw: s.Authenticated},
 		{Name: "source", Value: string(s.Source), Raw: string(s.Source)},
-		{Name: "api_key_suffix", Value: s.APIKeySuffix, Raw: s.APIKeySuffix},
-		{Name: "token_fingerprint", Value: s.Fingerprint, Raw: s.Fingerprint},
+		{Name: "apiKeySuffix", Value: s.APIKeySuffix, Raw: s.APIKeySuffix},
+		{Name: "tokenFingerprint", Value: s.Fingerprint, Raw: s.Fingerprint},
 	}
 }
 

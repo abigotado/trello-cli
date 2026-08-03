@@ -262,3 +262,29 @@ func TestCacheFileIsNotWorldReadable(t *testing.T) {
 		t.Errorf("cache file mode is %o, want no group or other access", perm)
 	}
 }
+
+// Rename makes the file never torn, but it does not make the write per-entry.
+// Two invocations resolving different scopes would each rewrite the whole file
+// from their own snapshot and discard the other's work.
+func TestConcurrentWritesToDifferentScopesBothSurvive(t *testing.T) {
+	isolateCacheDir(t)
+
+	var wg sync.WaitGroup
+	scopes := []string{"boards", "lists:b1", "lists:b2", "cards:b1"}
+	for _, scope := range scopes {
+		wg.Add(1)
+		go func(scope string) {
+			defer wg.Done()
+			// Separate Cache values, as separate processes would have.
+			NewCache("tok", time.Minute).Put(scope, objects("X-"+scope), time.Now())
+		}(scope)
+	}
+	wg.Wait()
+
+	c := NewCache("tok", time.Minute)
+	for _, scope := range scopes {
+		if _, ok := c.Get(scope); !ok {
+			t.Errorf("scope %q was lost to a concurrent writer", scope)
+		}
+	}
+}

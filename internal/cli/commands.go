@@ -3,7 +3,6 @@ package cli
 import (
 	"context"
 	"errors"
-	"fmt"
 
 	"github.com/abigotado/trello-cli/internal/auth"
 	"github.com/abigotado/trello-cli/internal/errx"
@@ -132,7 +131,10 @@ func (a *App) newAuthLoginCommand() *cobra.Command {
 			Fingerprint:   creds.Fingerprint(),
 		}
 		if a.dryRun {
-			return a.out.Success(view)
+			// planView, not accountView: a dry run that returned the success
+			// shape with "authenticated": true would be indistinguishable on
+			// stdout from a credential write that actually happened.
+			return a.plan("auth login", map[string]string{"account": name}, nil)
 		}
 		if err := a.store.Save(ctx, name, creds); err != nil {
 			return err
@@ -217,11 +219,17 @@ func (a *App) newAuthDefaultCommand() *cobra.Command {
 	}
 	return a.newCommand(cmd, func(_ context.Context, _ *cobra.Command, args []string) error {
 		name := args[0]
+		// --account means "the account this invocation acts on" everywhere
+		// else, so silently ignoring it here would be the one inconsistency in
+		// the surface. Refuse rather than pick.
+		if a.account != "" && a.account != name {
+			return errx.Usage("auth default takes the account as its argument; --account %s contradicts it", a.account)
+		}
 		if err := auth.ValidateAccountName(name); err != nil {
 			return err
 		}
 		if a.dryRun {
-			return a.out.Success(accountView{Account: name, Default: true})
+			return a.plan("auth default", map[string]string{"account": name}, nil)
 		}
 		if err := a.registry.SetDefault(name); err != nil {
 			return err
@@ -245,8 +253,7 @@ func (a *App) newAuthLogoutCommand() *cobra.Command {
 			return err
 		}
 		if a.dryRun {
-			fmt.Fprintf(a.stderr, "dry-run: would remove the credentials for account %q\n", name)
-			return a.out.Success(accountView{Account: name, Source: auth.SourceNone})
+			return a.plan("auth logout", map[string]string{"account": name}, nil)
 		}
 		if err := a.store.Delete(ctx, name); err != nil {
 			return err
