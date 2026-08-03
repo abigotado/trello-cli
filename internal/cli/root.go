@@ -285,6 +285,10 @@ func Execute(args []string) errx.Code {
 func (a *App) Run(ctx context.Context, root *cobra.Command, args []string) (code errx.Code) {
 	root.SetArgs(args)
 	defer func() {
+		// One write per invocation rather than one per resolution.
+		if a.res != nil {
+			a.res.Flush()
+		}
 		for _, cancel := range a.cancels {
 			cancel()
 		}

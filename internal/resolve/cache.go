@@ -33,6 +33,11 @@ type Cache struct {
 
 	loaded bool
 	data   cacheFile
+	// dirty is set by a change that has not reached disk yet. Writes are
+	// deferred to one Flush per invocation: the index was rewritten in full on
+	// every resolution, so `cards list` paid for two complete file rewrites
+	// and a repeated lookup paid for one that changed nothing.
+	dirty bool
 	// dropped records scopes invalidated here, so merging with a concurrent
 	// writer's copy does not restore an entry we just proved stale.
 	dropped map[string]bool
@@ -93,8 +98,17 @@ func (c *Cache) Put(scope string, objects []Object, now time.Time) {
 		return
 	}
 	c.load()
+	// Skip the write only when the entry is unchanged AND still live. An
+	// expired entry with identical contents must still have its timestamp
+	// renewed, or it can never become fresh again and every later lookup pays
+	// for a live fetch.
+	if existing, ok := c.data.Entries[scope]; ok &&
+		sameObjects(existing.Objects, objects) &&
+		now.Sub(existing.FetchedAt) <= c.ttl {
+		return
+	}
 	c.data.Entries[scope] = cacheEntry{FetchedAt: now, Objects: objects}
-	c.save()
+	c.dirty = true
 }
 
 // Invalidate drops one scope. Called when a cached id turns out to be gone.
@@ -111,7 +125,33 @@ func (c *Cache) Invalidate(scope string) {
 		c.dropped = map[string]bool{}
 	}
 	c.dropped[scope] = true
+	c.dirty = true
+}
+
+// Flush writes pending changes, once, at the end of an invocation.
+//
+// Nothing else writes the index. A caller that never resolved a name, or
+// resolved one it already had, performs no file I/O at all.
+func (c *Cache) Flush() {
+	if c.Disabled() || !c.dirty {
+		return
+	}
+	c.dirty = false
 	c.save()
+}
+
+// sameObjects reports whether two candidate sets are identical in order and
+// content, which is the common case on a repeated lookup.
+func sameObjects(a, b []Object) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // Clear removes the cache file entirely.
@@ -120,6 +160,7 @@ func (c *Cache) Clear() error {
 		return nil
 	}
 	c.loaded = false
+	c.dirty = false
 	c.data = cacheFile{}
 	if err := os.Remove(c.path); err != nil && !os.IsNotExist(err) {
 		return err

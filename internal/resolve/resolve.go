@@ -185,6 +185,14 @@ func (r *Resolver) Member(ctx context.Context, boardID, query string) (Object, e
 	})
 }
 
+// Flush persists any index changes this invocation made. Call it once, at the
+// end; nothing is written before it.
+func (r *Resolver) Flush() {
+	if r.Cache != nil {
+		r.Cache.Flush()
+	}
+}
+
 // Invalidate drops a cached scope, so the next resolution goes live.
 func (r *Resolver) Invalidate(scope string) {
 	if r.Cache != nil {

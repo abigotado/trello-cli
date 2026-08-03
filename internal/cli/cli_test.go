@@ -926,7 +926,7 @@ func TestAuthListEnumeratesAccountsAndMarksTheDefault(t *testing.T) {
 			t.Fatalf("login %s exit code = %d", name, got)
 		}
 	}
-	if got := h.run("auth", "list"); got != errx.CodeOK {
+	if got := h.run("auth", "list", "--check"); got != errx.CodeOK {
 		t.Fatalf("exit code = %d, want 0\nstderr: %s", got, h.err())
 	}
 
@@ -968,6 +968,38 @@ func TestAuthListEnumeratesAccountsAndMarksTheDefault(t *testing.T) {
 		if a.Fingerprint == "" {
 			t.Errorf("account %q has no fingerprint to tell it apart", a.Account)
 		}
+	}
+}
+
+// Listing accounts must not touch the keychain. On macOS an unsigned binary
+// raises a modal prompt per account, and an agent calling this to discover
+// accounts would hang on the first invisible dialog.
+func TestAuthListDoesNotReadTheKeychainByDefault(t *testing.T) {
+	store := &fakeStore{creds: auth.Credentials{APIKey: "abcd1234", Token: "tok"}}
+	h := newHarness(t, nil, store)
+	for _, name := range []string{"work", "personal"} {
+		if got := h.run("--account", name, "auth", "login", "--api-key", "abcd1234", "--token", "tok"); got != errx.CodeOK {
+			t.Fatalf("login %s exit code = %d", name, got)
+		}
+	}
+
+	store.loadedAccount = ""
+	if got := h.run("auth", "list"); got != errx.CodeOK {
+		t.Fatalf("exit code = %d, want 0", got)
+	}
+	if store.loadedAccount != "" {
+		t.Errorf("auth list read the keychain for %q without --check", store.loadedAccount)
+	}
+	// The names still have to be there — that is the point of the command.
+	if !strings.Contains(h.out(), "work") || !strings.Contains(h.out(), "personal") {
+		t.Errorf("auth list omitted account names:\n%s", h.out())
+	}
+
+	if got := h.run("auth", "list", "--check"); got != errx.CodeOK {
+		t.Fatalf("--check exit code = %d, want 0", got)
+	}
+	if store.loadedAccount == "" {
+		t.Error("--check did not verify any account")
 	}
 }
 

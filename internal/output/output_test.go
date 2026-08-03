@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -487,4 +488,91 @@ func TestJSONShapeIsTheDeclaredFieldSetWithOrWithoutProjection(t *testing.T) {
 			t.Errorf("key %q = %v projected but %v by default", name, v, full)
 		}
 	}
+}
+
+// The envelope key set is the contract. Before the first tagged release the
+// shape is still provisional, so v stays 1 while it settles; from that tag on,
+// any change here is breaking and must bump errx.EnvelopeVersion.
+//
+// This test is the mechanism that makes that rule real. It fails on any
+// rename, removal, or addition, so no envelope change can happen by accident —
+// it has to be an edit to this list, which is the moment to decide about v.
+func TestEnvelopeKeySetIsPinned(t *testing.T) {
+	tests := []struct {
+		name string
+		emit func(*Writer) error
+		want []string
+	}{
+		{
+			name: "success with a single object",
+			emit: func(w *Writer) error { return w.Success(card{id: "1", name: "A"}) },
+			want: []string{"ok", "v", "data"},
+		},
+		{
+			name: "success with a collection",
+			emit: func(w *Writer) error { return w.Success([]card{{id: "1"}}) },
+			want: []string{"ok", "v", "data", "meta"},
+		},
+		{
+			name: "failure",
+			emit: func(w *Writer) error { w.Failure(errx.Usage("nope")); return nil },
+			want: []string{"ok", "v", "error", "hint"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w, out, _ := newWriter(FormatJSON, nil)
+			if err := tt.emit(w); err != nil {
+				t.Fatalf("emit: %v", err)
+			}
+			var env map[string]any
+			if err := json.Unmarshal(out.Bytes(), &env); err != nil {
+				t.Fatalf("bad JSON: %v\n%s", err, out.String())
+			}
+			got := make([]string, 0, len(env))
+			for k := range env {
+				got = append(got, k)
+			}
+			sort.Strings(got)
+			want := append([]string(nil), tt.want...)
+			sort.Strings(want)
+			if strings.Join(got, ",") != strings.Join(want, ",") {
+				t.Errorf("envelope keys = %v, want %v.\nThis is a contract change: "+
+					"decide whether errx.EnvelopeVersion must bump before editing this list.", got, want)
+			}
+		})
+	}
+
+	// Nested key sets, pinned for the same reason.
+	t.Run("meta", func(t *testing.T) {
+		w, out, _ := newWriter(FormatJSON, nil)
+		if err := w.SuccessPage([]card{{id: "1"}}, true); err != nil {
+			t.Fatalf("emit: %v", err)
+		}
+		var env struct {
+			Meta map[string]any `json:"meta"`
+		}
+		if err := json.Unmarshal(out.Bytes(), &env); err != nil {
+			t.Fatalf("bad JSON: %v", err)
+		}
+		if len(env.Meta) != 2 || env.Meta["count"] == nil || env.Meta["truncated"] != true {
+			t.Errorf("meta = %v, want exactly count and truncated", env.Meta)
+		}
+	})
+
+	t.Run("error", func(t *testing.T) {
+		w, out, _ := newWriter(FormatJSON, nil)
+		w.Failure(errx.Ambiguous("board", "R", []errx.Candidate{{ID: "1", Name: "R1"}}))
+		var env struct {
+			Error map[string]any `json:"error"`
+		}
+		if err := json.Unmarshal(out.Bytes(), &env); err != nil {
+			t.Fatalf("bad JSON: %v", err)
+		}
+		for _, want := range []string{"code", "message", "candidates"} {
+			if _, ok := env.Error[want]; !ok {
+				t.Errorf("error body is missing %q: %v", want, env.Error)
+			}
+		}
+	})
 }

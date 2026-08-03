@@ -21,6 +21,14 @@ wins and `internal/errx` is the thing that gets fixed.
   names, types, and nullability.
 - Adding a field is additive. Renaming, removing, or changing the type of one
   requires bumping `v`.
+- **`v` is frozen at the first tagged release.** Until then it stays `1` and
+  describes the shape as of the current commit — nothing has been published, so
+  there is no compatibility to keep. From the first tag onward every change
+  above is breaking and bumps `v`.
+- The envelope key set is pinned by `TestEnvelopeKeySetIsPinned` in
+  `internal/output`. It fails on any rename, removal, or addition, so an
+  envelope change cannot happen by accident: editing that list is the moment to
+  decide about `v`.
 - `error.code` is a stable `SCREAMING_SNAKE_CASE` string. It is where new
   granularity goes — prefer a new code over a new exit code.
 - `hint` is written for a machine reader: it states the next action

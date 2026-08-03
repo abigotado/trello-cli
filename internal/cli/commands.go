@@ -181,31 +181,40 @@ func (a *App) newAuthStatusCommand() *cobra.Command {
 }
 
 func (a *App) newAuthListCommand() *cobra.Command {
-	return a.newCommand(
-		&cobra.Command{
-			Use:   "list",
-			Short: "List the stored accounts",
-			Args:  cobra.NoArgs,
-		},
-		func(ctx context.Context, _ *cobra.Command, _ []string) error {
-			names := a.registry.List()
-			views := make([]accountView, 0, len(names))
-			for _, name := range names {
-				view := accountView{Account: name, Default: a.registry.Default() == name}
-				// Reading each entry is what makes the listing honest: a name
-				// whose credential was removed out of band must not be
-				// reported as usable.
+	var check bool
+	cmd := &cobra.Command{
+		Use:   "list",
+		Short: "List the stored accounts",
+		Long: "List the stored accounts.\n\n" +
+			"Names and the default come from the local registry, so this reads no\n" +
+			"credentials. Pass --check to also verify each account still has a usable\n" +
+			"credential — that reads the keychain once per account, which on macOS can\n" +
+			"raise one access prompt per account for an unsigned binary.",
+		Args: cobra.NoArgs,
+	}
+	cmd.Flags().BoolVar(&check, "check", false, "verify each account's credential (reads the keychain per account)")
+
+	return a.newCommand(cmd, func(ctx context.Context, _ *cobra.Command, _ []string) error {
+		names := a.registry.List()
+		views := make([]accountView, 0, len(names))
+		for _, name := range names {
+			view := accountView{Account: name, Default: a.registry.Default() == name}
+			// Deliberately not read by default. Loading every account meant one
+			// keychain access per account, and on macOS an unsigned binary
+			// raises a modal prompt for each — so an agent calling this to
+			// discover accounts would hang on the first invisible dialog.
+			if check {
 				if creds, err := a.store.Load(ctx, name); err == nil && creds.Valid() {
 					view.Authenticated = true
 					view.Source = auth.SourceKeyring
 					view.APIKeySuffix = keySuffix(creds.APIKey)
 					view.Fingerprint = creds.Fingerprint()
 				}
-				views = append(views, view)
 			}
-			return a.out.Success(views)
-		},
-	)
+			views = append(views, view)
+		}
+		return a.out.Success(views)
+	})
 }
 
 func (a *App) newAuthDefaultCommand() *cobra.Command {

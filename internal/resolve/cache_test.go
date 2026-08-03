@@ -48,6 +48,7 @@ func TestCacheIsKeyedByToken(t *testing.T) {
 	}
 
 	work.Put("boards", objects("Work Roadmap"), time.Now())
+	work.Flush()
 
 	if _, ok := personal.Get("boards"); ok {
 		t.Error("a different token read the first token's index")
@@ -74,6 +75,9 @@ func TestCacheMissIsNeverAuthoritative(t *testing.T) {
 	}
 }
 
+// An expired entry whose contents happen to be unchanged must still be
+// renewed. Skipping that write on content equality alone would leave it
+// permanently stale, so every later lookup pays for a live fetch.
 func TestCacheExpiry(t *testing.T) {
 	isolateCacheDir(t)
 	c := NewCache("tok", 100*time.Millisecond)
@@ -110,6 +114,7 @@ func TestClearRemovesTheFile(t *testing.T) {
 	isolateCacheDir(t)
 	c := NewCache("tok", time.Minute)
 	c.Put("boards", objects("Roadmap"), time.Now())
+	c.Flush()
 
 	if _, err := os.Stat(c.Path()); err != nil {
 		t.Fatalf("cache file was never written: %v", err)
@@ -161,7 +166,8 @@ func TestCorruptAndStaleFilesAreDiscarded(t *testing.T) {
 
 // Two invocations of a short-lived binary can write at the same moment. The
 // temp-file-plus-rename write means a reader sees the old file or the new one,
-// never a half-written one — so no lock is needed.
+// never a half-written one, and the lock keeps the read-modify-write cycles
+// from interleaving.
 func TestConcurrentWritesLeaveAValidFile(t *testing.T) {
 	isolateCacheDir(t)
 
@@ -173,6 +179,7 @@ func TestConcurrentWritesLeaveAValidFile(t *testing.T) {
 			// Separate Cache values, as separate processes would have.
 			c := NewCache("tok", time.Minute)
 			c.Put("boards", objects("Board"+string(rune('A'+i))), time.Now())
+			c.Flush()
 		}(i)
 	}
 	wg.Wait()
@@ -203,6 +210,7 @@ func TestWritesLeaveNoTempFiles(t *testing.T) {
 	c := NewCache("tok", time.Minute)
 	for i := 0; i < 5; i++ {
 		c.Put("boards", objects("Roadmap"), time.Now())
+		c.Flush()
 	}
 	entries, err := os.ReadDir(filepath.Dir(c.Path()))
 	if err != nil {
@@ -228,6 +236,7 @@ func TestDisabledCacheIsInertNotFatal(t *testing.T) {
 	// None of these may panic.
 	c.Put("boards", objects("Roadmap"), time.Now())
 	c.Invalidate("boards")
+	c.Flush()
 	if err := c.Clear(); err != nil {
 		t.Errorf("Clear() on a disabled cache = %v", err)
 	}
@@ -253,6 +262,7 @@ func TestCacheFileIsNotWorldReadable(t *testing.T) {
 	isolateCacheDir(t)
 	c := NewCache("tok", time.Minute)
 	c.Put("boards", objects("Roadmap"), time.Now())
+	c.Flush()
 
 	info, err := os.Stat(c.Path())
 	if err != nil {
@@ -276,7 +286,9 @@ func TestConcurrentWritesToDifferentScopesBothSurvive(t *testing.T) {
 		go func(scope string) {
 			defer wg.Done()
 			// Separate Cache values, as separate processes would have.
-			NewCache("tok", time.Minute).Put(scope, objects("X-"+scope), time.Now())
+			c := NewCache("tok", time.Minute)
+			c.Put(scope, objects("X-"+scope), time.Now())
+			c.Flush()
 		}(scope)
 	}
 	wg.Wait()
@@ -287,4 +299,47 @@ func TestConcurrentWritesToDifferentScopesBothSurvive(t *testing.T) {
 			t.Errorf("scope %q was lost to a concurrent writer", scope)
 		}
 	}
+}
+
+// The index was rewritten in full on every resolution, so a command that
+// resolved two scopes paid for two complete file rewrites and a repeated
+// lookup paid for one that changed nothing.
+func TestWritesAreDeferredAndSkippedWhenNothingChanged(t *testing.T) {
+	isolateCacheDir(t)
+
+	c := NewCache("tok", time.Minute)
+	c.Put("boards", objects("Roadmap"), time.Now())
+	if _, err := os.Stat(c.Path()); !os.IsNotExist(err) {
+		t.Error("Put wrote to disk; writes must wait for Flush")
+	}
+	c.Flush()
+	if _, err := os.Stat(c.Path()); err != nil {
+		t.Fatalf("Flush did not write: %v", err)
+	}
+	first := modTime(t, c.Path())
+
+	// Re-resolving the same names must not rewrite the file.
+	next := NewCache("tok", time.Minute)
+	next.Put("boards", objects("Roadmap"), time.Now())
+	next.Flush()
+	if got := modTime(t, c.Path()); got != first {
+		t.Error("an unchanged entry rewrote the index")
+	}
+
+	// A real change must.
+	changed := NewCache("tok", time.Minute)
+	changed.Put("boards", objects("Roadmap", "Personal"), time.Now())
+	changed.Flush()
+	if _, ok := NewCache("tok", time.Minute).Get("boards"); !ok {
+		t.Error("the changed entry was not persisted")
+	}
+}
+
+func modTime(t *testing.T, path string) int64 {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat %s: %v", path, err)
+	}
+	return info.ModTime().UnixNano()
 }
