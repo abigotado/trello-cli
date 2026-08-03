@@ -25,23 +25,31 @@ func (m memberView) Fields() []output.Field {
 	}
 }
 
-// authStatusView renders credential status.
+// accountView renders one account's credential status.
 //
 // It carries a fingerprint, never the token: printing a credential is the one
 // mistake in this tool that cannot be walked back.
-type authStatusView struct {
+type accountView struct {
+	Account       string      `json:"account,omitempty"`
 	Authenticated bool        `json:"authenticated"`
 	Source        auth.Source `json:"source"`
 	APIKeySuffix  string      `json:"api_key_suffix,omitempty"`
 	Fingerprint   string      `json:"token_fingerprint,omitempty"`
+	Default       bool        `json:"default"`
 }
 
-func (s authStatusView) Fields() []output.Field {
+func (s accountView) Fields() []output.Field {
 	state := "not authenticated"
 	if s.Authenticated {
 		state = "authenticated"
 	}
+	marker := ""
+	if s.Default {
+		marker = "(default)"
+	}
 	return []output.Field{
+		{Name: "account", Value: s.Account, Raw: s.Account},
+		{Name: "default", Value: marker, Raw: s.Default},
 		{Name: "authenticated", Value: state, Raw: s.Authenticated},
 		{Name: "source", Value: string(s.Source), Raw: string(s.Source)},
 		{Name: "api_key_suffix", Value: s.APIKeySuffix, Raw: s.APIKeySuffix},

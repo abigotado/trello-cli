@@ -51,35 +51,59 @@ func (a *App) newMeCommand() *cobra.Command {
 func (a *App) newAuthCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "auth",
-		Short: "Manage Trello credentials",
-		Args:  usageArgs(cobra.NoArgs),
-		RunE:  func(c *cobra.Command, _ []string) error { return c.Help() },
+		Short: "Manage Trello credentials, across any number of accounts",
+		Long: "Manage Trello credentials.\n\n" +
+			"Accounts are selected per invocation with --account or TRELLO_CLI_ACCOUNT.\n" +
+			"There is deliberately no command to switch the active account: that would\n" +
+			"be hidden global state, and two concurrent runs would race over it.",
+		Args: usageArgs(cobra.NoArgs),
+		RunE: func(c *cobra.Command, _ []string) error { return c.Help() },
 	}
-	cmd.AddCommand(a.newAuthLoginCommand(), a.newAuthStatusCommand(), a.newAuthLogoutCommand())
+	cmd.AddCommand(
+		a.newAuthLoginCommand(),
+		a.newAuthStatusCommand(),
+		a.newAuthListCommand(),
+		a.newAuthDefaultCommand(),
+		a.newAuthLogoutCommand(),
+	)
 	return cmd
+}
+
+// targetAccount returns the account a management command should act on.
+//
+// Management commands take the name from --account and fall back to the
+// conventional default, rather than going through credential resolution: they
+// operate on the store itself, not on whatever happens to be authenticated.
+func (a *App) targetAccount() (string, error) {
+	name := a.account
+	if name == "" {
+		name = auth.DefaultAccount
+	}
+	if err := auth.ValidateAccountName(name); err != nil {
+		return "", err
+	}
+	return name, nil
 }
 
 func (a *App) newAuthLoginCommand() *cobra.Command {
 	var apiKey, token string
 	cmd := &cobra.Command{
 		Use:   "login",
-		Short: "Store a Trello API key and token in the OS keychain",
-		Long: "Store credentials in the OS keychain.\n\n" +
+		Short: "Store an API key and token for an account",
+		Long: "Store credentials for an account in the OS keychain.\n\n" +
 			"Get an API key at https://trello.com/power-ups/admin and a token by\n" +
-			"authorizing it. TRELLO_API_KEY and TRELLO_TOKEN always take precedence over\n" +
-			"anything stored here, and are the right choice for CI and headless agents.",
+			"authorizing it. Use --account to name the account; without one it is\n" +
+			"stored as \"default\". TRELLO_API_KEY and TRELLO_TOKEN still take precedence\n" +
+			"over anything stored here, which is the right choice for CI and headless\n" +
+			"agents.",
 		// Not cobra.NoArgs: its message embeds the offending argument, and a
 		// positional is exactly what someone reaches for first on a login
 		// command. `auth login MY-TOKEN` would then echo the credential into
-		// the error envelope on stdout, the agent transcript, and any log that
-		// captures them.
-		Args: func(*cobra.Command, []string) error {
-			return nil // validated below without echoing the value
-		},
+		// the error envelope on stdout and any log that captures it.
+		Args: func(*cobra.Command, []string) error { return nil },
 		Annotations: map[string]string{
 			// login writes the same stored credential logout removes, so both
-			// must answer to TRELLO_CLI_READONLY. Without this, locking the
-			// tool down blocks logout while still allowing a credential write.
+			// must answer to TRELLO_CLI_READONLY.
 			annotationMutates: "true",
 		},
 	}
@@ -95,24 +119,31 @@ func (a *App) newAuthLoginCommand() *cobra.Command {
 		if apiKey == "" || token == "" {
 			return errx.Usage("both --api-key and --token are required")
 		}
-		creds := auth.Credentials{APIKey: apiKey, Token: token}
-		if a.dryRun {
-			return a.out.Success(authStatusView{
-				Authenticated: true,
-				Source:        auth.SourceKeyring,
-				APIKeySuffix:  keySuffix(creds.APIKey),
-				Fingerprint:   creds.Fingerprint(),
-			})
-		}
-		if err := a.store.Save(ctx, creds); err != nil {
+		name, err := a.targetAccount()
+		if err != nil {
 			return err
 		}
-		return a.out.Success(authStatusView{
+		creds := auth.Credentials{APIKey: apiKey, Token: token}
+		view := accountView{
+			Account:       name,
 			Authenticated: true,
 			Source:        auth.SourceKeyring,
 			APIKeySuffix:  keySuffix(creds.APIKey),
 			Fingerprint:   creds.Fingerprint(),
-		})
+		}
+		if a.dryRun {
+			return a.out.Success(view)
+		}
+		if err := a.store.Save(ctx, name, creds); err != nil {
+			return err
+		}
+		// Registered after the credential lands, so a failed write never
+		// leaves a name pointing at nothing.
+		if err := a.registry.Add(name); err != nil {
+			return err
+		}
+		view.Default = a.registry.Default() == name
+		return a.out.Success(view)
 	})
 }
 
@@ -120,48 +151,109 @@ func (a *App) newAuthStatusCommand() *cobra.Command {
 	return a.newCommand(
 		&cobra.Command{
 			Use:   "status",
-			Short: "Report whether credentials are configured and where they came from",
+			Short: "Report which credentials this invocation would use",
 			Args:  cobra.NoArgs,
 		},
 		func(ctx context.Context, _ *cobra.Command, _ []string) error {
-			creds, source, err := auth.Resolver{Lookup: a.lookupEnv, Store: a.store}.Resolve(ctx)
+			res, err := a.resolveCredentials(ctx)
 			if err != nil {
 				// Not being authenticated is the honest answer to `status`,
 				// not a failure of the command. A keychain that is present but
-				// unreadable still is a failure, so only the one reason passes.
+				// unreadable still is a failure, so only these reasons pass.
 				var typed *errx.Error
-				if errors.As(err, &typed) && typed.Reason == "NOT_AUTHENTICATED" {
-					return a.out.Success(authStatusView{Source: auth.SourceNone})
+				if errors.As(err, &typed) && (typed.Reason == "NOT_AUTHENTICATED" || typed.Reason == "UNKNOWN_ACCOUNT") {
+					return a.out.Success(accountView{Source: auth.SourceNone})
 				}
 				return err
 			}
-			return a.out.Success(authStatusView{
+			return a.out.Success(accountView{
+				Account:       res.Account,
 				Authenticated: true,
-				Source:        source,
-				APIKeySuffix:  keySuffix(creds.APIKey),
-				Fingerprint:   creds.Fingerprint(),
+				Source:        res.Source,
+				APIKeySuffix:  keySuffix(res.Credentials.APIKey),
+				Fingerprint:   res.Credentials.Fingerprint(),
+				Default:       res.Account != "" && a.registry.Default() == res.Account,
 			})
 		},
 	)
 }
 
+func (a *App) newAuthListCommand() *cobra.Command {
+	return a.newCommand(
+		&cobra.Command{
+			Use:   "list",
+			Short: "List the stored accounts",
+			Args:  cobra.NoArgs,
+		},
+		func(ctx context.Context, _ *cobra.Command, _ []string) error {
+			names := a.registry.List()
+			views := make([]accountView, 0, len(names))
+			for _, name := range names {
+				view := accountView{Account: name, Default: a.registry.Default() == name}
+				// Reading each entry is what makes the listing honest: a name
+				// whose credential was removed out of band must not be
+				// reported as usable.
+				if creds, err := a.store.Load(ctx, name); err == nil && creds.Valid() {
+					view.Authenticated = true
+					view.Source = auth.SourceKeyring
+					view.APIKeySuffix = keySuffix(creds.APIKey)
+					view.Fingerprint = creds.Fingerprint()
+				}
+				views = append(views, view)
+			}
+			return a.out.Success(views)
+		},
+	)
+}
+
+func (a *App) newAuthDefaultCommand() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "default <account>",
+		Short: "Set the account used when none is named",
+		Args:  cobra.ExactArgs(1),
+		Annotations: map[string]string{
+			annotationMutates: "true",
+		},
+	}
+	return a.newCommand(cmd, func(_ context.Context, _ *cobra.Command, args []string) error {
+		name := args[0]
+		if err := auth.ValidateAccountName(name); err != nil {
+			return err
+		}
+		if a.dryRun {
+			return a.out.Success(accountView{Account: name, Default: true})
+		}
+		if err := a.registry.SetDefault(name); err != nil {
+			return err
+		}
+		return a.out.Success(accountView{Account: name, Default: true})
+	})
+}
+
 func (a *App) newAuthLogoutCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "logout",
-		Short: "Remove stored credentials from the OS keychain",
+		Short: "Remove one account's stored credentials",
 		Args:  cobra.NoArgs,
 		Annotations: map[string]string{
 			annotationMutates: "true",
 		},
 	}
 	return a.newCommand(cmd, func(ctx context.Context, _ *cobra.Command, _ []string) error {
-		if a.dryRun {
-			fmt.Fprintln(a.stderr, "dry-run: would delete the stored credentials")
-			return a.out.Success(authStatusView{Source: auth.SourceNone})
-		}
-		if err := a.store.Delete(ctx); err != nil {
+		name, err := a.targetAccount()
+		if err != nil {
 			return err
 		}
-		return a.out.Success(authStatusView{Source: auth.SourceNone})
+		if a.dryRun {
+			fmt.Fprintf(a.stderr, "dry-run: would remove the credentials for account %q\n", name)
+			return a.out.Success(accountView{Account: name, Source: auth.SourceNone})
+		}
+		if err := a.store.Delete(ctx, name); err != nil {
+			return err
+		}
+		if err := a.registry.Remove(name); err != nil {
+			return err
+		}
+		return a.out.Success(accountView{Account: name, Source: auth.SourceNone})
 	})
 }

@@ -44,6 +44,8 @@ type App struct {
 	// token is kept only to key the resolver's on-disk index. It is never
 	// logged, rendered, or written anywhere but that hash.
 	token string
+	// registry knows which accounts exist. It holds names only, never secrets.
+	registry *auth.Registry
 
 	// Resolved persistent flags.
 	format    string
@@ -55,6 +57,7 @@ type App struct {
 	jsonAlias bool
 	fuzzy     bool
 	noCache   bool
+	account   string
 
 	// cancels holds the context cancels to run when Execute returns. Kept on
 	// the App rather than at package scope so two Apps in one test process
@@ -73,6 +76,7 @@ func NewApp() *App {
 	return &App{
 		lookupEnv: os.LookupEnv,
 		store:     auth.KeyringStore{},
+		registry:  auth.NewRegistry(),
 		stdout:    os.Stdout,
 		stderr:    os.Stderr,
 	}
@@ -108,6 +112,10 @@ func (a *App) NewRootCommand() *cobra.Command {
 	flags.BoolVar(&a.assumeYes, "yes", false, "confirm a destructive operation")
 	flags.DurationVar(&a.timeout, "timeout", 0, "abort the command after this duration (default 30s)")
 	flags.BoolVarP(&a.verbose, "verbose", "v", false, "log request activity to stderr")
+	// Account selection is per invocation on purpose. There is no command to
+	// switch accounts, because an active-account setting is hidden global
+	// state that two concurrent invocations would race over.
+	flags.StringVar(&a.account, "account", "", "stored account to use (default: the account set by 'auth default')")
 	flags.BoolVar(&a.fuzzy, "fuzzy", false, "allow substring name matching (off by default: it fails by confidently picking the wrong object)")
 	flags.BoolVar(&a.noCache, "no-cache", false, "bypass the local name-resolution index")
 	// Retained so existing callers keep working after the move to -o.
@@ -175,18 +183,28 @@ func (a *App) trelloClient(ctx context.Context) (*trello.Client, error) {
 	if a.client != nil {
 		return a.client, nil
 	}
-	creds, _, err := auth.Resolver{Lookup: a.lookupEnv, Store: a.store}.Resolve(ctx)
+	res, err := a.resolveCredentials(ctx)
 	if err != nil {
 		return nil, err
 	}
-	a.token = creds.Token
+	a.token = res.Credentials.Token
 	a.client = trello.New(
 		a.cfg.BaseURL,
-		trello.Credentials{APIKey: creds.APIKey, Token: creds.Token},
+		trello.Credentials{APIKey: res.Credentials.APIKey, Token: res.Credentials.Token},
 		a.cfg.Concurrency,
 		trello.WithLogger(a.log),
 	)
 	return a.client, nil
+}
+
+// resolveCredentials picks the credentials this invocation should use.
+func (a *App) resolveCredentials(ctx context.Context) (auth.Resolution, error) {
+	return auth.Resolver{
+		Lookup:   a.lookupEnv,
+		Store:    a.store,
+		Registry: a.registry,
+		Account:  a.account,
+	}.Resolve(ctx)
 }
 
 // newCommand builds a command with the shared rails already attached.

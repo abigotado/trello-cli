@@ -26,17 +26,28 @@ type harness struct {
 }
 
 type fakeStore struct {
-	creds   auth.Credentials
-	deleted bool
-	saved   *auth.Credentials
+	creds          auth.Credentials
+	deleted        bool
+	saved          *auth.Credentials
+	savedAccount   string
+	deletedAccount string
+	loadedAccount  string
 }
 
-func (f *fakeStore) Load(context.Context) (auth.Credentials, error) { return f.creds, nil }
-func (f *fakeStore) Save(_ context.Context, c auth.Credentials) error {
+func (f *fakeStore) Load(_ context.Context, account string) (auth.Credentials, error) {
+	f.loadedAccount = account
+	return f.creds, nil
+}
+func (f *fakeStore) Save(_ context.Context, account string, c auth.Credentials) error {
+	f.savedAccount = account
 	f.saved = &c
 	return nil
 }
-func (f *fakeStore) Delete(context.Context) error { f.deleted = true; return nil }
+func (f *fakeStore) Delete(_ context.Context, account string) error {
+	f.deletedAccount = account
+	f.deleted = true
+	return nil
+}
 
 func newHarness(t *testing.T, envs map[string]string, store auth.Store) *harness {
 	t.Helper()
@@ -54,9 +65,15 @@ func newHarness(t *testing.T, envs map[string]string, store auth.Store) *harness
 	if store == nil {
 		store = &fakeStore{}
 	}
+	// Redirected so the account registry never lands in the developer's real
+	// config directory.
+	t.Setenv("HOME", dir)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "config"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(dir, "cache"))
 	app := &App{
 		lookupEnv: func(k string) (string, bool) { v, ok := envs[k]; return v, ok },
 		store:     store,
+		registry:  auth.NewRegistry(),
 		stdout:    stdout,
 		stderr:    stderr,
 	}
@@ -65,6 +82,16 @@ func newHarness(t *testing.T, envs map[string]string, store auth.Store) *harness
 
 func (h *harness) run(args ...string) errx.Code {
 	h.t.Helper()
+	// Truncate first, so out() and err() always describe the run that just
+	// happened rather than every run this harness has ever made.
+	for _, f := range []*os.File{h.stdout, h.stderr} {
+		if err := f.Truncate(0); err != nil {
+			h.t.Fatalf("truncate %s: %v", f.Name(), err)
+		}
+		if _, err := f.Seek(0, 0); err != nil {
+			h.t.Fatalf("seek %s: %v", f.Name(), err)
+		}
+	}
 	root := h.app.NewRootCommand()
 	// Regular files are not terminals, so the default format is already JSON;
 	// this makes that explicit rather than incidental.
@@ -823,5 +850,165 @@ func TestDeleteRefusesAPrefixMatch(t *testing.T) {
 	h3 := writeHarness(t, stub3, nil)
 	if got := h3.run("cards", "delete", "--board", "Roadmap", "--card", "Ship it", "--yes"); got != errx.CodeOK {
 		t.Errorf("exit code = %d, want 0: an exact name must still resolve\n%s", got, h3.out())
+	}
+}
+
+func TestAuthLoginStoresUnderTheNamedAccount(t *testing.T) {
+	store := &fakeStore{}
+	h := newHarness(t, nil, store)
+
+	if got := h.run("--account", "work", "auth", "login", "--api-key", "k", "--token", "t"); got != errx.CodeOK {
+		t.Fatalf("exit code = %d, want 0\nstderr: %s", got, h.err())
+	}
+	if store.savedAccount != "work" {
+		t.Errorf("saved under account %q, want work", store.savedAccount)
+	}
+	// Without --account it goes to the conventional default.
+	store2 := &fakeStore{}
+	h2 := newHarness(t, nil, store2)
+	if got := h2.run("auth", "login", "--api-key", "k", "--token", "t"); got != errx.CodeOK {
+		t.Fatalf("exit code = %d, want 0", got)
+	}
+	if store2.savedAccount != auth.DefaultAccount {
+		t.Errorf("saved under account %q, want %q", store2.savedAccount, auth.DefaultAccount)
+	}
+}
+
+func TestAuthLogoutRemovesOnlyTheNamedAccount(t *testing.T) {
+	store := &fakeStore{creds: auth.Credentials{APIKey: "k", Token: "t"}}
+	h := newHarness(t, nil, store)
+
+	if got := h.run("--account", "personal", "auth", "logout"); got != errx.CodeOK {
+		t.Fatalf("exit code = %d, want 0\nstderr: %s", got, h.err())
+	}
+	if store.deletedAccount != "personal" {
+		t.Errorf("deleted account %q, want personal", store.deletedAccount)
+	}
+}
+
+func TestAuthListEnumeratesAccountsAndMarksTheDefault(t *testing.T) {
+	store := &fakeStore{creds: auth.Credentials{APIKey: "abcd1234", Token: "tok"}}
+	h := newHarness(t, nil, store)
+
+	for _, name := range []string{"work", "personal"} {
+		if got := h.run("--account", name, "auth", "login", "--api-key", "abcd1234", "--token", "tok"); got != errx.CodeOK {
+			t.Fatalf("login %s exit code = %d", name, got)
+		}
+	}
+	if got := h.run("auth", "list"); got != errx.CodeOK {
+		t.Fatalf("exit code = %d, want 0\nstderr: %s", got, h.err())
+	}
+
+	var env struct {
+		Data []struct {
+			Account       string `json:"account"`
+			Default       bool   `json:"default"`
+			Authenticated bool   `json:"authenticated"`
+			Fingerprint   string `json:"token_fingerprint"`
+		} `json:"data"`
+		Meta *struct {
+			Count int `json:"count"`
+		} `json:"meta"`
+	}
+	if err := json.Unmarshal([]byte(h.out()), &env); err != nil {
+		t.Fatalf("bad envelope: %v\n%s", err, h.out())
+	}
+	if env.Meta == nil || env.Meta.Count != 2 {
+		t.Fatalf("meta = %+v, want a collection of 2", env.Meta)
+	}
+	// The first account logged in becomes the default.
+	defaults := 0
+	for _, a := range env.Data {
+		if a.Default {
+			defaults++
+			if a.Account != "work" {
+				t.Errorf("default is %q, want work", a.Account)
+			}
+		}
+	}
+	if defaults != 1 {
+		t.Errorf("%d accounts marked default, want exactly 1", defaults)
+	}
+	// The listing must never disclose a token.
+	if strings.Contains(h.out(), "tok\"") {
+		t.Errorf("auth list disclosed a token:\n%s", h.out())
+	}
+	for _, a := range env.Data {
+		if a.Fingerprint == "" {
+			t.Errorf("account %q has no fingerprint to tell it apart", a.Account)
+		}
+	}
+}
+
+func TestAuthDefaultRequiresAKnownAccount(t *testing.T) {
+	store := &fakeStore{}
+	h := newHarness(t, nil, store)
+	if got := h.run("--account", "work", "auth", "login", "--api-key", "k", "--token", "t"); got != errx.CodeOK {
+		t.Fatalf("login exit code = %d", got)
+	}
+
+	// A default pointing at an account that does not exist would resolve to
+	// nothing later, so it is refused up front.
+	if got := h.run("auth", "default", "nope"); got != errx.CodeNotFound {
+		t.Errorf("exit code = %d, want %d for an unknown account", got, errx.CodeNotFound)
+	}
+	if got := h.run("auth", "default", "work"); got != errx.CodeOK {
+		t.Errorf("exit code = %d, want 0 for a known account\n%s", got, h.out())
+	}
+}
+
+// --account must reach the data commands, not only the auth ones.
+func TestAccountFlagSelectsCredentialsForDataCommands(t *testing.T) {
+	stub := newWriteStub(t)
+	store := &fakeStore{creds: auth.Credentials{APIKey: "k", Token: "t"}}
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "config"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(dir, "cache"))
+	h := newHarness(t, map[string]string{"TRELLO_CLI_BASE_URL": stub.URL}, store)
+
+	if got := h.run("--account", "personal", "boards", "list"); got != errx.CodeOK {
+		t.Fatalf("exit code = %d, want 0\nstdout: %s\nstderr: %s", got, h.out(), h.err())
+	}
+	if store.loadedAccount != "personal" {
+		t.Errorf("credentials were read from account %q, want personal", store.loadedAccount)
+	}
+}
+
+// An account the caller named explicitly must be reported by name, not as a
+// generic "not authenticated" the caller cannot act on.
+func TestUnknownAccountIsReportedByName(t *testing.T) {
+	h := newHarness(t, nil, &fakeStore{})
+	if got := h.run("--account", "ghost", "me"); got != errx.CodeNotFound {
+		t.Fatalf("exit code = %d, want %d\n%s", got, errx.CodeNotFound, h.out())
+	}
+	var env struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(h.out()), &env); err != nil {
+		t.Fatalf("bad envelope: %v\n%s", err, h.out())
+	}
+	if env.Error.Code != "UNKNOWN_ACCOUNT" {
+		t.Errorf("error.code = %q, want UNKNOWN_ACCOUNT", env.Error.Code)
+	}
+	if !strings.Contains(env.Error.Message, "ghost") {
+		t.Errorf("the message should name the account, got %q", env.Error.Message)
+	}
+}
+
+// There must be no command that mutates a global "current account".
+func TestThereIsNoStatefulAccountSwitch(t *testing.T) {
+	h := newHarness(t, nil, nil)
+	for _, args := range [][]string{
+		{"auth", "use", "work"},
+		{"auth", "switch", "work"},
+	} {
+		if got := h.run(args...); got != errx.CodeUsage {
+			t.Errorf("%v exit code = %d, want %d: account selection must stay per-invocation",
+				args, got, errx.CodeUsage)
+		}
 	}
 }

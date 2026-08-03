@@ -1,10 +1,17 @@
-// Package auth resolves Trello credentials.
+// Package auth resolves Trello credentials, across any number of accounts.
 //
-// Lookup order is environment first, OS keychain second. The order is load
-// bearing: on macOS a freshly rebuilt, unsigned binary triggers a modal
-// keychain-access prompt, and an agent shelling out to it would hang on a
-// dialog it cannot see. The environment path must therefore be reachable
-// without touching the keychain at all.
+// Two rules shape everything here.
+//
+// Lookup prefers the environment over the OS keychain. On macOS a freshly
+// rebuilt, unsigned binary triggers a modal keychain-access prompt, and an
+// agent shelling out to it would hang on a dialog it cannot see, so the
+// environment path must be reachable without touching the keychain at all.
+//
+// Account selection is per invocation and never stateful. There is deliberately
+// no "switch accounts" command: an active-account setting is hidden global
+// state, two concurrent invocations would race over it, and the loser would
+// silently act on the wrong board — the exact failure this tool is built to
+// prevent everywhere else.
 package auth
 
 import (
@@ -13,6 +20,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"strings"
 
 	"github.com/abigotado/trello-cli/internal/errx"
 	"github.com/zalando/go-keyring"
@@ -21,13 +29,17 @@ import (
 const (
 	// KeyringService is the keychain service name.
 	KeyringService = "trello-cli"
-	// keyringUser stores both values as one JSON blob, so a partial write
-	// cannot leave a key without its token.
-	keyringUser = "credentials"
+	// accountPrefix namespaces one keychain entry per account.
+	accountPrefix = "account:"
+	// legacyUser is the single-account entry written before accounts existed.
+	// It is read as [DefaultAccount] so an existing login keeps working.
+	legacyUser = "credentials"
 
-	// EnvAPIKey and EnvToken are the environment overrides.
+	// EnvAPIKey and EnvToken supply credentials directly.
 	EnvAPIKey = "TRELLO_API_KEY"
 	EnvToken  = "TRELLO_TOKEN"
+	// EnvAccount names a stored account to use.
+	EnvAccount = "TRELLO_CLI_ACCOUNT"
 )
 
 // Credentials is a Trello API key and token.
@@ -43,8 +55,6 @@ type Credentials struct {
 func (c Credentials) Valid() bool { return c.APIKey != "" && c.Token != "" }
 
 // Fingerprint returns a short, non-reversible identifier safe to print.
-//
-// It is what `auth status` shows. It never contains the token itself.
 func (c Credentials) Fingerprint() string {
 	if c.Token == "" {
 		return ""
@@ -57,7 +67,7 @@ func (c Credentials) Fingerprint() string {
 type Source string
 
 const (
-	// SourceEnv means the environment supplied them.
+	// SourceEnv means the environment supplied them directly.
 	SourceEnv Source = "env"
 	// SourceKeyring means the OS keychain supplied them.
 	SourceKeyring Source = "keyring"
@@ -65,24 +75,51 @@ const (
 	SourceNone Source = "none"
 )
 
-// Store persists credentials. It is an interface so tests can substitute a
-// fake and never touch the real OS keychain.
+// ValidateAccountName rejects names that would be ambiguous on a command line
+// or unusable as a keychain key.
+func ValidateAccountName(name string) error {
+	if name == "" {
+		return errx.Usage("an account name is required")
+	}
+	if strings.TrimSpace(name) != name {
+		return errx.Usage("account name %q has leading or trailing whitespace", name)
+	}
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '-', r == '_', r == '.':
+		default:
+			return errx.Usage("account name %q may use only letters, digits, dash, underscore, and dot", name)
+		}
+	}
+	return nil
+}
+
+// Store persists credentials per account. It is an interface so tests can
+// substitute a fake and never touch the real OS keychain.
 type Store interface {
-	Load(ctx context.Context) (Credentials, error)
-	Save(ctx context.Context, creds Credentials) error
-	Delete(ctx context.Context) error
+	Load(ctx context.Context, account string) (Credentials, error)
+	Save(ctx context.Context, account string, creds Credentials) error
+	Delete(ctx context.Context, account string) error
 }
 
 // KeyringStore is the OS keychain implementation of [Store].
 type KeyringStore struct{}
 
-// Load reads credentials from the keychain. A missing entry is not an error:
-// it returns the zero Credentials so the caller can fall through.
-func (KeyringStore) Load(ctx context.Context) (Credentials, error) {
+func entryName(account string) string { return accountPrefix + account }
+
+// Load reads one account's credentials. A missing entry is not an error: it
+// returns the zero Credentials so the caller can fall through.
+func (KeyringStore) Load(ctx context.Context, account string) (Credentials, error) {
 	if err := ctx.Err(); err != nil {
 		return Credentials{}, err
 	}
-	raw, err := keyring.Get(KeyringService, keyringUser)
+	raw, err := keyring.Get(KeyringService, entryName(account))
+	if errors.Is(err, keyring.ErrNotFound) && account == DefaultAccount {
+		// Fall back to the pre-accounts entry, so an existing login keeps
+		// working without the user having to log in again.
+		raw, err = keyring.Get(KeyringService, legacyUser)
+	}
 	if err != nil {
 		if errors.Is(err, keyring.ErrNotFound) {
 			return Credentials{}, nil
@@ -91,13 +128,13 @@ func (KeyringStore) Load(ctx context.Context) (Credentials, error) {
 	}
 	var creds Credentials
 	if err := json.Unmarshal([]byte(raw), &creds); err != nil {
-		return Credentials{}, errx.Auth("KEYRING_CORRUPT", "stored credentials are unreadable").Wrap(err)
+		return Credentials{}, errx.Auth("KEYRING_CORRUPT", "stored credentials for account %q are unreadable", account).Wrap(err)
 	}
 	return creds, nil
 }
 
-// Save writes credentials to the keychain as a single atomic entry.
-func (KeyringStore) Save(ctx context.Context, creds Credentials) error {
+// Save writes one account's credentials as a single atomic entry.
+func (KeyringStore) Save(ctx context.Context, account string, creds Credentials) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -108,68 +145,151 @@ func (KeyringStore) Save(ctx context.Context, creds Credentials) error {
 	if err != nil {
 		return errx.Internal("encode credentials: %v", err)
 	}
-	if err := keyring.Set(KeyringService, keyringUser, string(blob)); err != nil {
+	if err := keyring.Set(KeyringService, entryName(account), string(blob)); err != nil {
 		return errx.Auth("KEYRING_UNAVAILABLE", "write keychain: %v", err).Wrap(err)
 	}
 	return nil
 }
 
-// Delete removes the keychain entry. Deleting a missing entry succeeds.
-func (KeyringStore) Delete(ctx context.Context) error {
+// Delete removes one account's entry. Deleting a missing entry succeeds.
+func (KeyringStore) Delete(ctx context.Context, account string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := keyring.Delete(KeyringService, keyringUser); err != nil {
-		if errors.Is(err, keyring.ErrNotFound) {
-			return nil
-		}
+	err := keyring.Delete(KeyringService, entryName(account))
+	if errors.Is(err, keyring.ErrNotFound) && account == DefaultAccount {
+		err = keyring.Delete(KeyringService, legacyUser)
+	}
+	if err != nil && !errors.Is(err, keyring.ErrNotFound) {
 		return errx.Auth("KEYRING_UNAVAILABLE", "delete from keychain: %v", err).Wrap(err)
 	}
 	return nil
 }
 
-// Resolver finds credentials, preferring the environment over the keychain.
+// Resolver finds the credentials one invocation should use.
 type Resolver struct {
 	// Lookup is normally os.LookupEnv. Tests supply their own.
 	Lookup func(string) (string, bool)
-	// Store is consulted only when the environment does not supply both
+	// Store is consulted only when the environment does not supply both raw
 	// values, so a headless caller never triggers a keychain prompt.
 	Store Store
+	// Registry supplies the stored default and the known account names.
+	Registry *Registry
+	// Account is the explicit --account selection, if any.
+	Account string
 }
 
-// Resolve returns credentials and where they came from.
-func (r Resolver) Resolve(ctx context.Context) (Credentials, Source, error) {
+// Resolution is the outcome of resolving credentials.
+type Resolution struct {
+	Credentials Credentials
+	Source      Source
+	// Account is the name the credentials came from, empty for the raw
+	// environment pair, which belongs to no named account.
+	Account string
+}
+
+// Resolve returns the credentials to use, and where they came from.
+//
+// Precedence, from most to least specific. The rule is that explicit beats
+// implicit and per-invocation beats stored:
+//
+//  1. --account NAME
+//  2. TRELLO_API_KEY plus TRELLO_TOKEN
+//  3. TRELLO_CLI_ACCOUNT
+//  4. the stored default account
+//  5. the only account, when exactly one exists
+func (r Resolver) Resolve(ctx context.Context) (Resolution, error) {
+	if r.Account != "" {
+		if err := ValidateAccountName(r.Account); err != nil {
+			return Resolution{}, err
+		}
+		return r.fromStore(ctx, r.Account, true)
+	}
+
+	if creds, err := r.fromEnv(); err != nil {
+		return Resolution{}, err
+	} else if creds.Valid() {
+		return Resolution{Credentials: creds, Source: SourceEnv}, nil
+	}
+
 	if r.Lookup != nil {
-		key, hasKey := r.Lookup(EnvAPIKey)
-		token, hasToken := r.Lookup(EnvToken)
-		if hasKey && hasToken && key != "" && token != "" {
-			return Credentials{APIKey: key, Token: token}, SourceEnv, nil
-		}
-		// A half-configured environment is almost always a typo in a shell
-		// profile or CI secret. Falling through to the keychain would use a
-		// different account than the one the caller just tried to select, so
-		// this fails loudly instead.
-		if (hasKey && key != "") != (hasToken && token != "") {
-			return Credentials{}, SourceNone, errx.Auth(
-				"PARTIAL_ENV_CREDENTIALS",
-				"only one of %s and %s is set; set both or neither",
-				EnvAPIKey, EnvToken,
-			)
+		if name, ok := r.Lookup(EnvAccount); ok && name != "" {
+			if err := ValidateAccountName(name); err != nil {
+				return Resolution{}, err
+			}
+			return r.fromStore(ctx, name, true)
 		}
 	}
+
+	if name := r.Registry.Default(); name != "" {
+		return r.fromStore(ctx, name, false)
+	}
+	if names := r.Registry.List(); len(names) == 1 {
+		return r.fromStore(ctx, names[0], false)
+	}
+	// Nothing named anything: try the implicit default, which is also where a
+	// pre-accounts login is found.
+	return r.fromStore(ctx, DefaultAccount, false)
+}
+
+// fromEnv reads the raw credential pair.
+func (r Resolver) fromEnv() (Credentials, error) {
+	if r.Lookup == nil {
+		return Credentials{}, nil
+	}
+	key, hasKey := r.Lookup(EnvAPIKey)
+	token, hasToken := r.Lookup(EnvToken)
+	haveKey := hasKey && key != ""
+	haveToken := hasToken && token != ""
+
+	if haveKey && haveToken {
+		return Credentials{APIKey: key, Token: token}, nil
+	}
+	// A half-configured environment is almost always a typo in a shell profile
+	// or a CI secret. Falling through would use a different account than the
+	// one the caller just tried to select.
+	if haveKey != haveToken {
+		return Credentials{}, errx.Auth(
+			"PARTIAL_ENV_CREDENTIALS",
+			"only one of %s and %s is set; set both or neither",
+			EnvAPIKey, EnvToken,
+		)
+	}
+	return Credentials{}, nil
+}
+
+// fromStore loads a named account. explicit reports whether the caller named
+// it, which decides how a miss is reported.
+func (r Resolver) fromStore(ctx context.Context, account string, explicit bool) (Resolution, error) {
 	if r.Store == nil {
-		return Credentials{}, SourceNone, notConfigured()
+		return Resolution{}, notConfigured(r.Registry)
 	}
-	creds, err := r.Store.Load(ctx)
+	creds, err := r.Store.Load(ctx, account)
 	if err != nil {
-		return Credentials{}, SourceNone, err
+		return Resolution{}, err
 	}
 	if !creds.Valid() {
-		return Credentials{}, SourceNone, notConfigured()
+		if explicit {
+			// The caller named this account, so say that it specifically is
+			// missing rather than reporting a generic "not authenticated".
+			return Resolution{}, &errx.Error{
+				Code:       errx.CodeNotFound,
+				Reason:     "UNKNOWN_ACCOUNT",
+				Message:    "no credentials are stored for account " + account,
+				Hint:       "run 'trello-cli auth login --account " + account + "', or 'trello-cli auth list' to see the accounts you have",
+				DidYouMean: candidateAccounts(r.Registry.List()),
+			}
+		}
+		return Resolution{}, notConfigured(r.Registry)
 	}
-	return creds, SourceKeyring, nil
+	return Resolution{Credentials: creds, Source: SourceKeyring, Account: account}, nil
 }
 
-func notConfigured() error {
-	return errx.Auth("NOT_AUTHENTICATED", "no Trello credentials found")
+func notConfigured(registry *Registry) error {
+	err := errx.Auth("NOT_AUTHENTICATED", "no Trello credentials found")
+	if names := registry.List(); len(names) > 1 {
+		err.Hint = "several accounts are stored; pick one with --account, or set a default with 'trello-cli auth default'"
+		err.DidYouMean = candidateAccounts(names)
+	}
+	return err
 }
