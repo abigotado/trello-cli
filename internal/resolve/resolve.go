@@ -82,6 +82,11 @@ type Fetcher interface {
 type Resolver struct {
 	Fetcher Fetcher
 	Cache   *Cache
+	// Strict stops the ladder at an exact name.
+	//
+	// Destructive commands set it: saving one round trip is not worth deleting
+	// the wrong card because a prefix happened to be unique at that moment.
+	Strict bool
 	// Fuzzy enables the last matching rung. Off by default: fuzzy matching
 	// fails by confidently returning a single wrong answer, not by reporting
 	// ambiguity, so a hallucinated name would be silently coerced onto a real
@@ -217,7 +222,7 @@ func (r *Resolver) resolve(
 	}
 
 	if cached, ok := r.cacheGet(scope); ok {
-		if obj, err := match(kind, query, cached, r.Fuzzy); err == nil {
+		if obj, err := match(kind, query, cached, r.Fuzzy, r.Strict); err == nil {
 			return obj, nil
 		}
 		// A cache miss is never authoritative. Falling through to a live
@@ -230,7 +235,7 @@ func (r *Resolver) resolve(
 		return Object{}, err
 	}
 	r.cachePut(scope, objects)
-	return match(kind, query, objects, r.Fuzzy)
+	return match(kind, query, objects, r.Fuzzy, r.Strict)
 }
 
 func (r *Resolver) cacheGet(scope string) ([]Object, bool) {
@@ -248,7 +253,7 @@ func (r *Resolver) cachePut(scope string, objects []Object) {
 }
 
 // match runs the resolution ladder against a candidate set.
-func match(kind Kind, query string, objects []Object, fuzzy bool) (Object, error) {
+func match(kind Kind, query string, objects []Object, fuzzy, strict bool) (Object, error) {
 	// Rung 1: an id or shortLink present in the set.
 	for _, o := range objects {
 		if o.ID == query || (o.ShortLink != "" && o.ShortLink == query) {
@@ -273,6 +278,13 @@ func match(kind Kind, query string, objects []Object, fuzzy bool) (Object, error
 	}
 	if len(hits) > 1 {
 		return Object{}, ambiguous(kind, query, hits)
+	}
+
+	// Rungs below here narrow by something less than an exact name, so a
+	// destructive caller stops at this point and reports what it could not
+	// match exactly.
+	if strict {
+		return Object{}, errx.NotFound(string(kind), query, suggestions(kind, query, objects))
 	}
 
 	// Rung 4: unique case-insensitive prefix.

@@ -601,3 +601,227 @@ func TestFieldsProjectionOnAListing(t *testing.T) {
 		}
 	}
 }
+
+// writeStub extends the read stub with the mutation routes, and records every
+// non-GET request so a test can prove a dry run sent none.
+type writeStub struct {
+	*httptest.Server
+	mutations []string
+}
+
+func newWriteStub(t *testing.T) *writeStub {
+	t.Helper()
+	stub := &writeStub{}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			stub.mutations = append(stub.mutations, r.Method+" "+r.URL.Path)
+		}
+		switch {
+		case r.URL.Path == "/members/me/boards":
+			_, _ = w.Write([]byte(`[{"id":"000000000000000000000001","name":"Roadmap","shortLink":"aaaaaaaa"},
+				{"id":"000000000000000000000002","name":"Roadmap 2026","shortLink":"bbbbbbbb"}]`))
+		case r.URL.Path == "/boards/000000000000000000000001/lists":
+			_, _ = w.Write([]byte(`[{"id":"000000000000000000000010","name":"Doing"},{"id":"000000000000000000000011","name":"Done"}]`))
+		case r.URL.Path == "/boards/000000000000000000000001/cards":
+			_, _ = w.Write([]byte(`[{"id":"000000000000000000000020","name":"Ship it","idList":"000000000000000000000010"}]`))
+		default:
+			_, _ = w.Write([]byte(`{"id":"000000000000000000000099","name":"created"}`))
+		}
+	})
+	stub.Server = httptest.NewServer(mux)
+	t.Cleanup(stub.Close)
+	return stub
+}
+
+func writeHarness(t *testing.T, stub *writeStub, extraEnv map[string]string) *harness {
+	t.Helper()
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(dir, "xdg"))
+	envs := map[string]string{
+		auth.EnvAPIKey:        "k",
+		auth.EnvToken:         "t",
+		"TRELLO_CLI_BASE_URL": stub.URL,
+	}
+	for k, v := range extraEnv {
+		envs[k] = v
+	}
+	return newHarness(t, envs, nil)
+}
+
+// A dry run that only echoed the caller's input back would validate nothing.
+// It must resolve every name to an id and then send no mutation at all.
+func TestDryRunResolvesNamesAndSendsNoMutation(t *testing.T) {
+	tests := []struct {
+		name       string
+		args       []string
+		wantAction string
+		wantTarget map[string]string
+	}{
+		{
+			name:       "cards create",
+			args:       []string{"--dry-run", "cards", "create", "--board", "Roadmap", "--list", "Doing", "--name", "New"},
+			wantAction: "cards create",
+			wantTarget: map[string]string{"board": "000000000000000000000001", "list": "000000000000000000000010"},
+		},
+		{
+			name:       "cards move",
+			args:       []string{"--dry-run", "cards", "move", "--board", "Roadmap", "--card", "Ship it", "--list", "Done"},
+			wantAction: "cards move",
+			wantTarget: map[string]string{"board": "000000000000000000000001", "card": "000000000000000000000020"},
+		},
+		{
+			name:       "lists create",
+			args:       []string{"--dry-run", "lists", "create", "--board", "Roadmap", "--name", "Backlog"},
+			wantAction: "lists create",
+			wantTarget: map[string]string{"board": "000000000000000000000001"},
+		},
+		{
+			// --dry-run stands in for --yes on a destructive command, so a
+			// caller can always preview before committing to it.
+			name:       "cards delete",
+			args:       []string{"--dry-run", "cards", "delete", "--board", "Roadmap", "--card", "Ship it"},
+			wantAction: "cards delete",
+			wantTarget: map[string]string{"card": "000000000000000000000020"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stub := newWriteStub(t)
+			h := writeHarness(t, stub, nil)
+
+			if got := h.run(tt.args...); got != errx.CodeOK {
+				t.Fatalf("exit code = %d, want 0\nstdout: %s\nstderr: %s", got, h.out(), h.err())
+			}
+			if len(stub.mutations) != 0 {
+				t.Errorf("--dry-run sent mutating requests: %v", stub.mutations)
+			}
+			var env struct {
+				Data struct {
+					DryRun bool              `json:"dry_run"`
+					Action string            `json:"action"`
+					Target map[string]string `json:"target"`
+				} `json:"data"`
+			}
+			if err := json.Unmarshal([]byte(h.out()), &env); err != nil {
+				t.Fatalf("bad envelope: %v\n%s", err, h.out())
+			}
+			if !env.Data.DryRun {
+				t.Error("the plan is not flagged as a dry run")
+			}
+			if env.Data.Action != tt.wantAction {
+				t.Errorf("action = %q, want %q", env.Data.Action, tt.wantAction)
+			}
+			for k, want := range tt.wantTarget {
+				if env.Data.Target[k] != want {
+					t.Errorf("target[%q] = %q, want %q — a dry run must report the resolved id",
+						k, env.Data.Target[k], want)
+				}
+			}
+		})
+	}
+}
+
+func TestMutationsActuallySendWithoutDryRun(t *testing.T) {
+	stub := newWriteStub(t)
+	h := writeHarness(t, stub, nil)
+
+	if got := h.run("cards", "create", "--board", "Roadmap", "--list", "Doing", "--name", "New"); got != errx.CodeOK {
+		t.Fatalf("exit code = %d, want 0\nstderr: %s", got, h.err())
+	}
+	if len(stub.mutations) == 0 {
+		t.Fatal("no mutating request was sent")
+	}
+	if stub.mutations[0] != "POST /cards" {
+		t.Errorf("sent %q, want POST /cards", stub.mutations[0])
+	}
+}
+
+// Every mutating command must answer to read-only mode. Checking them as a set
+// is what catches the next one that forgets the annotation.
+func TestReadOnlyBlocksEveryMutatingCommand(t *testing.T) {
+	commands := [][]string{
+		{"lists", "create", "--board", "Roadmap", "--name", "X"},
+		{"lists", "archive", "--board", "Roadmap", "--list", "Doing"},
+		{"cards", "create", "--board", "Roadmap", "--list", "Doing", "--name", "X"},
+		{"cards", "update", "--card-id", "c1", "--name", "X"},
+		{"cards", "move", "--board", "Roadmap", "--card", "Ship it", "--list", "Done"},
+		{"cards", "archive", "--card-id", "c1"},
+		{"cards", "delete", "--card-id", "c1", "--yes"},
+		{"labels", "add", "--board", "Roadmap", "--card", "Ship it", "--label", "red"},
+		{"labels", "remove", "--board", "Roadmap", "--card", "Ship it", "--label", "red"},
+		{"members", "assign", "--board", "Roadmap", "--card", "Ship it", "--member", "nik"},
+		{"members", "unassign", "--board", "Roadmap", "--card", "Ship it", "--member", "nik"},
+		{"comments", "add", "--card-id", "c1", "--text", "hi"},
+		{"checklists", "create", "--card-id", "c1", "--name", "Steps"},
+		{"checklists", "add-item", "--checklist-id", "cl1", "--name", "Step"},
+		{"checklists", "toggle", "--card-id", "c1", "--item-id", "i1"},
+		{"attachments", "add", "--card-id", "c1", "--url", "https://example.com"},
+		{"auth", "login", "--api-key", "k", "--token", "t"},
+		{"auth", "logout"},
+	}
+	for _, args := range commands {
+		t.Run(strings.Join(args[:2], " "), func(t *testing.T) {
+			stub := newWriteStub(t)
+			h := writeHarness(t, stub, map[string]string{"TRELLO_CLI_READONLY": "1"})
+
+			if got := h.run(args...); got != errx.CodeUsage {
+				t.Errorf("exit code = %d, want %d (usage)\nstdout: %s", got, errx.CodeUsage, h.out())
+			}
+			if len(stub.mutations) != 0 {
+				t.Errorf("read-only mode still sent %v", stub.mutations)
+			}
+		})
+	}
+}
+
+func TestDeleteRequiresConfirmation(t *testing.T) {
+	stub := newWriteStub(t)
+	h := writeHarness(t, stub, nil)
+
+	if got := h.run("cards", "delete", "--card-id", "000000000000000000000020"); got != errx.CodeConfirm {
+		t.Fatalf("exit code = %d, want %d (confirmation required)", got, errx.CodeConfirm)
+	}
+	if len(stub.mutations) != 0 {
+		t.Errorf("an unconfirmed delete still sent %v", stub.mutations)
+	}
+
+	stub2 := newWriteStub(t)
+	h2 := writeHarness(t, stub2, nil)
+	if got := h2.run("cards", "delete", "--card-id", "000000000000000000000020", "--yes"); got != errx.CodeOK {
+		t.Fatalf("exit code = %d, want 0\nstderr: %s", got, h2.err())
+	}
+	if len(stub2.mutations) != 1 || !strings.HasPrefix(stub2.mutations[0], "DELETE ") {
+		t.Errorf("confirmed delete sent %v", stub2.mutations)
+	}
+}
+
+// Saving one round trip is not worth deleting the wrong card because a prefix
+// happened to be unique at that moment.
+func TestDeleteRefusesAPrefixMatch(t *testing.T) {
+	stub := newWriteStub(t)
+	h := writeHarness(t, stub, nil)
+
+	// "Ship" is a unique prefix of "Ship it" and resolves fine for a read.
+	if got := h.run("cards", "list", "--board", "Roadmap"); got != errx.CodeOK {
+		t.Fatalf("setup listing failed: %d", got)
+	}
+
+	stub2 := newWriteStub(t)
+	h2 := writeHarness(t, stub2, nil)
+	got := h2.run("cards", "delete", "--board", "Roadmap", "--card", "Ship", "--yes")
+	if got != errx.CodeNotFound {
+		t.Errorf("exit code = %d, want %d: a destructive command must not accept a prefix", got, errx.CodeNotFound)
+	}
+	if len(stub2.mutations) != 0 {
+		t.Errorf("a refused delete still sent %v", stub2.mutations)
+	}
+
+	// The exact name still works.
+	stub3 := newWriteStub(t)
+	h3 := writeHarness(t, stub3, nil)
+	if got := h3.run("cards", "delete", "--board", "Roadmap", "--card", "Ship it", "--yes"); got != errx.CodeOK {
+		t.Errorf("exit code = %d, want 0: an exact name must still resolve\n%s", got, h3.out())
+	}
+}

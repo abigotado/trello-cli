@@ -108,6 +108,22 @@ func (c *Client) Get(ctx context.Context, path string, query url.Values, out any
 	return c.do(ctx, http.MethodGet, path, query, nil, out)
 }
 
+// Post creates a resource. Trello takes write parameters in the query string,
+// not a JSON body, so query carries the fields being set.
+func (c *Client) Post(ctx context.Context, path string, query url.Values, out any) error {
+	return c.do(ctx, http.MethodPost, path, query, nil, out)
+}
+
+// Put updates a resource.
+func (c *Client) Put(ctx context.Context, path string, query url.Values, out any) error {
+	return c.do(ctx, http.MethodPut, path, query, nil, out)
+}
+
+// Delete removes a resource.
+func (c *Client) Delete(ctx context.Context, path string, query url.Values) error {
+	return c.do(ctx, http.MethodDelete, path, query, nil, nil)
+}
+
 func (c *Client) do(ctx context.Context, method, path string, query url.Values, body, out any) error {
 	var payload []byte
 	if body != nil {
@@ -145,7 +161,11 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 				return errx.Translate(ctx.Err())
 			}
 			lastErr = errx.Retryable("NETWORK", 0, "%s %s: %v", method, path, redact(err)).Wrap(err)
-			if attempt == maxAttempts {
+			// A transport error means the request may or may not have reached
+			// the server. Replaying a POST there could create a second card,
+			// and a duplicate is worse than a reported failure the caller can
+			// retry deliberately.
+			if attempt == maxAttempts || !isIdempotent(method) {
 				return lastErr
 			}
 			if err := c.sleep(ctx, c.backoff(attempt)); err != nil {
@@ -154,11 +174,17 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 			continue
 		}
 
-		retryAfter, retryable, apiErr := c.handle(resp, method, path, out)
+		retryAfter, retry, apiErr := c.handle(resp, method, path, out)
 		if apiErr == nil {
 			return nil
 		}
-		if !retryable || attempt == maxAttempts {
+		// Rejected means the server refused before acting, so a replay is safe
+		// for any verb. Applied-maybe means it might already have taken
+		// effect, so only verbs that repeat harmlessly are replayed.
+		if retry == retryMaybeApplied && !isIdempotent(method) {
+			retry = retryNone
+		}
+		if retry == retryNone || attempt == maxAttempts {
 			return apiErr
 		}
 		lastErr = apiErr
@@ -172,6 +198,13 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 		}
 	}
 	return lastErr
+}
+
+// isIdempotent reports whether replaying method cannot cause a second effect.
+//
+// POST creates, so it is the one verb a retry can duplicate.
+func isIdempotent(method string) bool {
+	return method != http.MethodPost
 }
 
 func (c *Client) send(ctx context.Context, method, path string, query url.Values, payload []byte) (*http.Response, error) {
@@ -200,9 +233,22 @@ func (c *Client) send(ctx context.Context, method, path string, query url.Values
 	return c.http.Do(req)
 }
 
+// retryClass says whether, and why, a failed request may be sent again.
+type retryClass int
+
+const (
+	// retryNone means the failure is permanent.
+	retryNone retryClass = iota
+	// retryRejected means the server refused the request before acting on it,
+	// so replaying it cannot duplicate an effect.
+	retryRejected
+	// retryMaybeApplied means the request may already have taken effect.
+	retryMaybeApplied
+)
+
 // handle consumes the response. It returns the advertised retry delay, whether
-// the failure is worth retrying, and the translated error (nil on success).
-func (c *Client) handle(resp *http.Response, method, path string, out any) (time.Duration, bool, error) {
+// the failure may be replayed, and the translated error (nil on success).
+func (c *Client) handle(resp *http.Response, method, path string, out any) (time.Duration, retryClass, error) {
 	defer func() {
 		// Drain before closing so the connection can be reused.
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
@@ -213,12 +259,12 @@ func (c *Client) handle(resp *http.Response, method, path string, out any) (time
 
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		if out == nil {
-			return 0, false, nil
+			return 0, retryNone, nil
 		}
 		if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
-			return 0, false, errx.Internal("decode %s %s response: %v", method, path, err)
+			return 0, retryNone, errx.Internal("decode %s %s response: %v", method, path, err)
 		}
-		return 0, false, nil
+		return 0, retryNone, nil
 	}
 
 	// Trello does not always answer with JSON. A 401 comes back as a short
@@ -232,7 +278,7 @@ func (c *Client) handle(resp *http.Response, method, path string, out any) (time
 		if apiCode != "" {
 			reason = apiCode
 		}
-		return 0, false, errx.Auth(reason, "Trello rejected the credentials: %s", message)
+		return 0, retryNone, errx.Auth(reason, "Trello rejected the credentials: %s", message)
 
 	case resp.StatusCode == http.StatusTooManyRequests:
 		delay := parseRetryAfter(resp.Header.Get("Retry-After"))
@@ -240,10 +286,10 @@ func (c *Client) handle(resp *http.Response, method, path string, out any) (time
 		if apiCode != "" {
 			reason = apiCode
 		}
-		return delay, true, errx.Retryable(reason, delay, "Trello rate limit reached: %s", message)
+		return delay, retryRejected, errx.Retryable(reason, delay, "Trello rate limit reached: %s", message)
 
 	case resp.StatusCode == http.StatusNotFound:
-		return 0, false, &errx.Error{
+		return 0, retryNone, &errx.Error{
 			Code:    errx.CodeNotFound,
 			Reason:  "NOT_FOUND",
 			Message: fmt.Sprintf("%s %s: %s", method, path, message),
@@ -251,13 +297,13 @@ func (c *Client) handle(resp *http.Response, method, path string, out any) (time
 		}
 
 	case resp.StatusCode >= 500:
-		return 0, true, errx.Retryable("SERVER_ERROR", 0, "Trello returned %d: %s", resp.StatusCode, message)
+		return 0, retryMaybeApplied, errx.Retryable("SERVER_ERROR", 0, "Trello returned %d: %s", resp.StatusCode, message)
 
 	case resp.StatusCode == http.StatusBadRequest:
-		return 0, false, errx.Usage("Trello rejected the request: %s", message)
+		return 0, retryNone, errx.Usage("Trello rejected the request: %s", message)
 
 	default:
-		return 0, false, errx.Internal("unexpected Trello status %d: %s", resp.StatusCode, message)
+		return 0, retryNone, errx.Internal("unexpected Trello status %d: %s", resp.StatusCode, message)
 	}
 }
 

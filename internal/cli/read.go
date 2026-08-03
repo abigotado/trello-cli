@@ -10,7 +10,8 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// readCommands returns every command that only reads.
+// readCommands returns the top-level command groups. Each group holds its
+// read subcommands and, from write.go, its mutating ones.
 func (a *App) readCommands() []*cobra.Command {
 	return []*cobra.Command{
 		a.newBoardsCommand(),
@@ -130,7 +131,7 @@ func (a *App) newListsCommand() *cobra.Command {
 		}
 		return a.out.Success(views)
 	})
-	return group("lists", "Work with lists", sub)
+	return group("lists", "Work with lists", append([]*cobra.Command{sub}, a.listsWriteCommands()...)...)
 }
 
 func (a *App) newCardsCommand() *cobra.Command {
@@ -215,7 +216,7 @@ func (a *App) newCardsCommand() *cobra.Command {
 		return a.out.Success(view)
 	})
 
-	return group("cards", "Work with cards", listCmd, getCmd)
+	return group("cards", "Work with cards", append([]*cobra.Command{listCmd, getCmd}, a.cardsWriteCommands()...)...)
 }
 
 func (a *App) newLabelsCommand() *cobra.Command {
@@ -242,7 +243,7 @@ func (a *App) newLabelsCommand() *cobra.Command {
 		}
 		return a.out.Success(views)
 	})
-	return group("labels", "Work with labels", sub)
+	return group("labels", "Work with labels", append([]*cobra.Command{sub}, a.labelsWriteCommands()...)...)
 }
 
 func (a *App) newMembersCommand() *cobra.Command {
@@ -269,7 +270,7 @@ func (a *App) newMembersCommand() *cobra.Command {
 		}
 		return a.out.Success(views)
 	})
-	return group("members", "Work with board members", sub)
+	return group("members", "Work with board members", append([]*cobra.Command{sub}, a.membersWriteCommands()...)...)
 }
 
 func (a *App) newCommentsCommand() *cobra.Command {
@@ -304,7 +305,7 @@ func (a *App) newCommentsCommand() *cobra.Command {
 		}
 		return a.out.Success(views)
 	})
-	return group("comments", "Work with card comments", sub)
+	return group("comments", "Work with card comments", append([]*cobra.Command{sub}, a.commentsWriteCommands()...)...)
 }
 
 func (a *App) newChecklistsCommand() *cobra.Command {
@@ -332,7 +333,7 @@ func (a *App) newChecklistsCommand() *cobra.Command {
 		}
 		return a.out.Success(views)
 	})
-	return group("checklists", "Work with card checklists", sub)
+	return group("checklists", "Work with card checklists", append([]*cobra.Command{sub}, a.checklistsWriteCommands()...)...)
 }
 
 func (a *App) newAttachmentsCommand() *cobra.Command {
@@ -360,7 +361,7 @@ func (a *App) newAttachmentsCommand() *cobra.Command {
 		}
 		return a.out.Success(views)
 	})
-	return group("attachments", "Work with card attachments", sub)
+	return group("attachments", "Work with card attachments", append([]*cobra.Command{sub}, a.attachmentsWriteCommands()...)...)
 }
 
 func (a *App) newSearchCommand() *cobra.Command {

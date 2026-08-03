@@ -19,6 +19,15 @@ type objectRef struct {
 
 func (r objectRef) empty() bool { return r.name == "" && r.id == "" }
 
+// nameOrID returns whichever spelling the caller supplied, preferring the
+// explicit id.
+func (r objectRef) nameOrID() string {
+	if r.id != "" {
+		return r.id
+	}
+	return r.name
+}
+
 // bind registers --<kind> and --<kind>-id on cmd.
 func (r *objectRef) bind(cmd *cobra.Command, kind, help string) {
 	cmd.Flags().StringVar(&r.name, kind, "", help)
