@@ -1,0 +1,56 @@
+# Architecture
+
+`trello-cli` is a single Go binary. It is driven far more often by an AI agent
+shelling out to it than by a human typing, and every design rule below follows
+from that.
+
+## Packages
+
+| Package | Owns | Must not |
+| --- | --- | --- |
+| `cmd/trello-cli` | process entry, `recover()`, exit-code delivery | contain business logic |
+| `internal/cli` | cobra commands, flag wiring, one file per noun | import `net/http`; contain business logic |
+| `internal/resolve` | name → ID resolution, ambiguity, index cache | render user-facing text |
+| `internal/output` | envelope, `--fields` projection, text renderer | make network calls |
+| `internal/auth` | `CredentialStore`: env, then OS keychain | be imported by `internal/trello` |
+| `internal/config` | defaults: base URL, timeout, default board/list | read credentials |
+| `internal/trello` | REST client, pacing, retry, models | format user-facing text; import `internal/auth` |
+| `internal/errx` | typed errors, exit codes, hints | import anything else in this module |
+
+## Dependency direction
+
+```
+cli → {resolve, output, auth, config} → trello → errx
+```
+
+Three invariants, verified with `go list -deps` rather than by eye:
+
+- **`internal/trello` must not import `internal/auth`.** Credentials arrive as
+  a value in the client constructor. Importing `auth` inverts the arrow and
+  makes the client untestable without a keychain.
+- **`internal/errx` imports nothing from this module.** The `candidates`
+  payload therefore uses `errx.Candidate`, never `[]trello.Board`. A convenience
+  import here is what turns the bottom of the stack into a cycle.
+- **`internal/cli` never calls `net/http`.** If a command needs a request that
+  the client does not expose, add the method to `internal/trello`.
+
+## Context
+
+Every I/O function takes `context.Context` as its first parameter. The root
+command builds one `context.WithTimeout` (default 30s, `--timeout`), threads it
+through `RunE`, and cancels it on `SIGINT`. Never create a `context.Background()`
+partway down the stack — that silently opts out of the user's timeout and
+cancellation.
+
+## Streams
+
+stdout carries **only** the response envelope. Every log, warning, progress
+line, and prompt goes to stderr. An agent parses stdout; anything else written
+there corrupts the parse.
+
+## Adding a command
+
+Use the shared command-construction helper in `internal/cli`. It registers the
+persistent flags and the `Annotations["mutates"]` marker that the dry-run,
+confirmation, and read-only middleware depend on. A command built by hand
+silently opts out of all three rails.

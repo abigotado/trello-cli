@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Point this clone's Git hooks at .githooks/.
+#
+# This mutates local Git config, so it is the developer's decision and never the
+# agent's — see .agents/rules/quality-gates.md.
+set -euo pipefail
+
+repo_root=$(git rev-parse --show-toplevel)
+cd "$repo_root"
+
+chmod +x .githooks/pre-push
+git config --local core.hooksPath .githooks
+
+echo "Installed: core.hooksPath = $(git config --local --get core.hooksPath)"

@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# trello-cli pre-push quality gate.
+#
+# Install with `.githooks/install`, remove with `.githooks/uninstall`.
+# Do not bypass with `git push --no-verify` — if the gate is wrong, fix the gate.
+set -euo pipefail
+
+repo_root=$(git rev-parse --show-toplevel)
+cd "$repo_root"
+
+fail() {
+  echo "pre-push: $1" >&2
+  exit 1
+}
+
+if ! command -v go >/dev/null 2>&1; then
+  fail "go is not on PATH"
+fi
+
+# No Go sources yet (harness-only checkout): skip the Go gate rather than
+# failing a push that has no Go code to validate.
+if [ -f go.mod ]; then
+  echo "pre-push: gofmt"
+  unformatted=$(gofmt -l . | grep -v '^vendor/' || true)
+  if [ -n "$unformatted" ]; then
+    echo "$unformatted" >&2
+    fail "the files above are not gofmt-clean"
+  fi
+
+  echo "pre-push: go vet"
+  go vet ./... || fail "go vet failed"
+
+  echo "pre-push: go build"
+  go build ./... || fail "go build failed"
+
+  echo "pre-push: go test"
+  go test -race ./... || fail "go test failed"
+else
+  echo "pre-push: no go.mod yet; skipping Go checks"
+fi
+
+# The agent harness is compiled, not hand-written. A drifted mirror means the
+# canonical .agents/ inputs changed without recompiling.
+python_bin="${AGENT_HARNESS_PYTHON:-python3}"
+if [ -d .agents ] && "$python_bin" -c 'pass' >/dev/null 2>&1; then
+  echo "pre-push: agent harness"
+  "$python_bin" .agents/scripts/sync-rules.py --check || fail "Cursor rule mirrors are out of sync"
+  "$python_bin" -m unittest discover -s .agents/tests -p 'test_*.py' -q \
+    || fail "harness unit tests failed"
+
+  tracked=$(git ls-files .claude .codex)
+  if [ -n "$tracked" ]; then
+    echo "$tracked" >&2
+    fail "generated provider mirrors are committed; remove them"
+  fi
+
+  # The provider compiler is the machine-local global harness, so CI cannot run
+  # it. This is the only place compile drift gets caught — but a contributor
+  # without the global harness must still be able to push, so a missing
+  # compiler warns rather than fails.
+  global_compiler="${HOME}/.agents/compiler.py"
+  if [ -f "$global_compiler" ]; then
+    "$python_bin" "$global_compiler" --source .agents --root . --scope project --check \
+      || fail "provider mirrors are out of date; recompile before pushing"
+  else
+    echo "pre-push: WARN: $global_compiler not found; skipped provider mirror check" >&2
+  fi
+fi
+
+echo "pre-push: ok"

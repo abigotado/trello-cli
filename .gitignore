@@ -1,0 +1,22 @@
+# Generated agent-harness mirrors. The canonical inputs live in .agents/.
+# These must never be committed: hook commands render with an absolute {root}
+# path, so committing them bakes one machine's checkout path into the repo.
+# CI enforces this in .github/workflows/agent_harness.yaml.
+.claude/
+.codex/
+
+# Go build output
+/trello-cli
+/dist/
+*.test
+*.prof
+coverage.out
+
+# Harness script bytecode
+__pycache__/
+*.py[cod]
+
+# Local environment
+.env
+.env.*
+.DS_Store

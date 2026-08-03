@@ -1,0 +1,60 @@
+# Testing
+
+## Shape
+
+Table-driven with `t.Run()` subtests. Name each case for its condition and
+expected result (`"ambiguous name returns candidates"`), not for its index.
+
+```go
+tests := []struct {
+    name string
+    // inputs
+    // want
+}{...}
+for _, tt := range tests {
+    t.Run(tt.name, func(t *testing.T) { ... })
+}
+```
+
+## Boundaries
+
+Test at boundaries, not internals.
+
+- **HTTP**: `net/http/httptest`. Never call the real Trello API from a test.
+  Point the client's base URL at the test server via `internal/config`.
+- **Keychain**: `keyring.MockInit()`. Never touch the real OS keychain — on a
+  Linux CI runner `go-keyring` needs D-Bus and will fail or hang, and on macOS
+  it raises a modal prompt.
+- **Filesystem**: `t.TempDir()`. Never write to the developer's real cache
+  directory.
+- **Environment**: `t.Setenv()`. Never mutate `os.Environ` directly.
+
+A test that depends on the developer's home directory, network, or Trello
+account is not a test.
+
+## What must be covered
+
+Every behavior change needs a test that fails without the change. Beyond the
+happy path, these cases are the ones that actually break:
+
+- Empty and single-element results.
+- Ambiguous match → exit 4 with a populated `candidates`.
+- No match → exit 3 with `did_you_mean`.
+- A cache hit whose object was deleted server-side → falls through to a live
+  lookup rather than returning a stale ID.
+- 429 with and without `Retry-After`.
+- A non-JSON error body. Trello returns 401 as `text/plain`; a client that
+  assumes JSON panics there.
+- A panic inside a command surfaces as exit 1, never 2.
+
+## Contract tests
+
+Exit codes and the envelope are golden-file tested. When one legitimately
+changes, the golden file changes in the same commit as `internal/errx` and the
+regenerated `docs/contract.md`, never separately.
+
+## Rules
+
+- `go test -race ./...` must pass before review.
+- Do not weaken an assertion to make a failing test pass. Report the failure.
+- If a test cannot fail because of a real bug, delete it.

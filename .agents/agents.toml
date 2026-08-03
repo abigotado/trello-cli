@@ -1,0 +1,89 @@
+[agents.orchestrator]
+description = "Coordinate non-trivial trello-cli work through planning, advisory review, implementation, tests, review, and an independent second opinion."
+prompt_file = "agents/orchestrator.md"
+claude_model = "opus"
+claude_tools = ["Read", "Grep", "Glob", "Bash", "Agent"]
+claude_max_turns = 30
+codex_model = "gpt-5.6-sol"
+codex_reasoning_effort = "high"
+read_only = true
+
+[agents.planner]
+description = "Produce dependency-ordered trello-cli implementation plans without editing files."
+prompt_file = "agents/planner.md"
+claude_model = "opus"
+claude_tools = ["Read", "Grep", "Glob", "Bash", "Agent"]
+claude_max_turns = 18
+codex_model = "gpt-5.6-sol"
+codex_reasoning_effort = "high"
+read_only = true
+
+[agents.advisor]
+description = "Read-only adversarial review of a trello-cli implementation plan before any code is written."
+prompt_file = "agents/advisor.md"
+claude_model = "opus"
+claude_tools = ["Read", "Grep", "Glob", "Bash"]
+claude_max_turns = 18
+codex_model = "gpt-5.6-sol"
+codex_reasoning_effort = "high"
+read_only = true
+
+[agents.explorer]
+description = "Trace trello-cli packages, commands, tests, and existing patterns with file and line evidence."
+prompt_file = "agents/explorer.md"
+claude_model = "haiku"
+claude_tools = ["Read", "Grep", "Glob", "Bash"]
+claude_max_turns = 20
+codex_model = "gpt-5.6-terra"
+codex_reasoning_effort = "medium"
+read_only = true
+
+[agents.coder]
+description = "Implement scoped Go changes in trello-cli after planning."
+prompt_file = "agents/coder.md"
+claude_model = "sonnet"
+claude_tools = ["Read", "Grep", "Glob", "Edit", "Write", "Bash"]
+claude_max_turns = 40
+codex_model = "gpt-5.6-terra"
+codex_reasoning_effort = "high"
+read_only = false
+
+[agents.test-writer]
+description = "Add focused trello-cli table-driven unit tests and httptest boundary tests for changed behavior."
+prompt_file = "agents/test-writer.md"
+claude_model = "sonnet"
+claude_tools = ["Read", "Grep", "Glob", "Edit", "Write", "Bash"]
+claude_max_turns = 28
+codex_model = "gpt-5.6-terra"
+codex_reasoning_effort = "high"
+read_only = false
+
+[agents.cli-contract-guardian]
+description = "Validate trello-cli exit codes, JSON envelope, flag naming, and package dependency direction against silent breaking changes."
+prompt_file = "agents/cli-contract-guardian.md"
+claude_model = "sonnet"
+claude_tools = ["Read", "Grep", "Glob", "Bash"]
+claude_max_turns = 20
+codex_model = "gpt-5.6-terra"
+codex_reasoning_effort = "medium"
+read_only = true
+
+[agents.reviewer]
+description = "Review trello-cli changes for correctness, architecture, regressions, and missing tests."
+prompt_file = "agents/reviewer.md"
+claude_model = "opus"
+claude_tools = ["Read", "Grep", "Glob", "Bash"]
+claude_max_turns = 18
+codex_model = "gpt-5.6-sol"
+codex_reasoning_effort = "high"
+read_only = true
+
+[agents.adversarial-review]
+description = "Independent second-opinion review of completed trello-cli changes; findings first, no implementation."
+prompt_file = "agents/adversarial-review.md"
+claude_model = "opus"
+claude_tools = ["Read", "Grep", "Glob", "Bash"]
+claude_max_turns = 18
+codex_model = "gpt-5.6-sol"
+codex_reasoning_effort = "high"
+read_only = true

@@ -1,0 +1,24 @@
+# Both commands use `{claude_hook_dir}`, not `{root}/.agents/hooks`. The
+# compiler already mirrors every canonical hook into the provider's own hook
+# directory; pointing at `.agents/hooks` instead leaves those mirrored copies
+# unreferenced dead files, which is what the inherited convention did.
+
+# Blocks `git push --no-verify` and any `core.hooksPath` override that would
+# route the push around `.githooks/pre-push`. Unlike the post-edit hook below
+# this one is a gate, so it denies on malformed input rather than failing soft.
+[[hooks]]
+id = "pre_push_guard"
+event = "pre_tool_use"
+providers = ["claude"]
+matcher = "Bash"
+timeout = 10
+command = "{python} \"{claude_hook_dir}/pre_push_guard.py\""
+
+# Formats only the single file that was just edited. Repository-wide formatting
+# is never automatic here: it would bury a scoped change in unrelated diff noise.
+[[hooks]]
+id = "go_format"
+event = "post_tool_use"
+providers = ["claude"]
+matcher = "Edit|Write"
+command = "bash \"{claude_hook_dir}/go-format.sh\""

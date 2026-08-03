@@ -1,0 +1,4 @@
+interface:
+  display_name: "Plan trello-cli Change"
+  short_description: "Create an evidence-based trello-cli change plan"
+  default_prompt: "Use $plan to produce a dependency-ordered trello-cli implementation plan."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Review trello-cli Change"
+  short_description: "Review a trello-cli change and get a second opinion"
+  default_prompt: "Use $review to review the current trello-cli change and surface findings."

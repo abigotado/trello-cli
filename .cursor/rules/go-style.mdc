@@ -1,0 +1,48 @@
+---
+description: trello-cli Go conventions: errors, context, resources, naming.
+alwaysApply: false
+globs: "**/*.go"
+---
+
+# Go conventions
+
+The global Go rules in `~/.agents/rules/go.md` apply. This file adds what is
+specific to this repository.
+
+## Errors
+
+- Wrap with `fmt.Errorf("...: %w", err)`. The message names the operation that
+  failed, not the obvious (`"resolve board %q: %w"`, not `"error: %w"`).
+- Never discard an error. `_ =` requires a comment saying why it is safe.
+- Domain errors are typed in `internal/errx` and carry their exit code. A
+  command returns an error; it never calls `os.Exit` itself.
+- Errors crossing a package boundary are translated, not leaked. A cobra command
+  must never surface a raw `*url.Error` to the user.
+
+## Resources
+
+- `defer resp.Body.Close()` immediately after a successful request, every time.
+- Drain the body before closing when the connection should be reused.
+- Cancel every context you create. `defer cancel()` on the same line block.
+
+## Types
+
+- Explicit return types; no naked returns outside three-line functions.
+- Accept interfaces, return structs. `CredentialStore` is an interface because
+  tests substitute it; the Trello client is a struct.
+- Zero values should be usable, or the constructor should be the only way to
+  build the type. Do not ship a struct that panics when used unconstructed.
+
+## Concurrency
+
+- Fan-out is bounded by the shared semaphore in `internal/trello`. Do not spawn
+  unbounded goroutines per item.
+- Every goroutine has a defined exit path tied to the context.
+- `go test -race` must pass. A data race is a blocking defect, not a flake.
+
+## What not to do
+
+- No package-level mutable state. Dependencies are passed explicitly.
+- No `init()` beyond trivial registration.
+- No `panic()` for expected conditions — return an `errx` error.
+- No `interface{}`/`any` where a concrete type or a small interface fits.

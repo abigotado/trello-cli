@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Restore this clone's default Git hooks path.
+#
+# This mutates local Git config, so it is the developer's decision and never the
+# agent's — see .agents/rules/quality-gates.md.
+set -euo pipefail
+
+repo_root=$(git rev-parse --show-toplevel)
+cd "$repo_root"
+
+if git config --local --get core.hooksPath >/dev/null 2>&1; then
+  git config --local --unset core.hooksPath
+  echo "Removed local core.hooksPath."
+else
+  echo "No local core.hooksPath was set."
+fi

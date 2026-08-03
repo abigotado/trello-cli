@@ -1,0 +1,77 @@
+name: agent harness
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".agents/**"
+      - ".cursor/rules/**"
+      - "AGENTS.md"
+      - "CLAUDE.md"
+      - ".gitignore"
+      - ".github/workflows/agent_harness.yaml"
+      # Generated mirrors are ignored, so these only ever match when someone
+      # force-adds them — the regression the untracked check exists to catch.
+      # Without them such a push would not trigger this workflow at all.
+      - ".claude/**"
+      - ".codex/**"
+  pull_request:
+    branches:
+      - main
+    paths:
+      - ".agents/**"
+      - ".cursor/rules/**"
+      - "AGENTS.md"
+      - "CLAUDE.md"
+      - ".gitignore"
+      - ".github/workflows/agent_harness.yaml"
+      - ".claude/**"
+      - ".codex/**"
+
+jobs:
+  harness:
+    name: Harness consistency
+    runs-on: ubuntu-latest
+    steps:
+      - name: Git Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          # tomllib requires 3.11+.
+          python-version: "3.12"
+
+      - name: Generated mirrors must stay untracked
+        run: |
+          TRACKED=$(git ls-files .claude .codex)
+          if [ -n "$TRACKED" ]; then
+            echo "::error::Generated provider mirrors are committed. Remove them:"
+            echo "$TRACKED"
+            exit 1
+          fi
+
+      - name: Cursor mirrors are in sync
+        run: python3 .agents/scripts/sync-rules.py --check
+
+      - name: Harness unit tests
+        run: python3 -m unittest discover -s .agents/tests -p 'test_*.py'
+
+      # The provider compiler is not vendored — it lives in the machine-local
+      # global harness, which a runner does not have. Compile determinism is
+      # therefore a local pre-push check, not a CI check. What CI can still
+      # enforce is that nobody vendored it back in without the duplication that
+      # decision implies.
+      - name: Provider compiler must stay unvendored
+        run: |
+          if [ -e .agents/scripts/compiler.py ]; then
+            echo "::error::.agents/scripts/compiler.py is committed. The provider"
+            echo "::error::compiler is intentionally the global ~/.agents one; see"
+            echo "::error::.agents/README.md."
+            exit 1
+          fi

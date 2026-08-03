@@ -1,0 +1,13 @@
+name = "claude"
+config_dir = ".claude"
+# settings.local.json belongs to the tool: it persists every "always allow"
+# grant a developer approves. The compiler assigns the permission lists wholesale,
+# so owning that file would delete those grants on each run. It owns
+# settings.json instead, and the two are merged by the tool at load time.
+settings_file = "settings.json"
+instructions_file = "CLAUDE.md"
+agent_dir = "agents"
+hook_dir = "hooks"
+default_mode = "default"
+skip_dangerous_mode_permission_prompt = false
+python_command = "${AGENT_HARNESS_PYTHON:-python3}"

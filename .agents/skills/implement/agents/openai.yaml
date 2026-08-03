@@ -1,0 +1,4 @@
+interface:
+  display_name: "Implement trello-cli Change"
+  short_description: "Plan, implement, test, and review a trello-cli change"
+  default_prompt: "Use $implement to deliver a reviewed, tested trello-cli change."

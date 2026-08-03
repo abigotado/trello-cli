@@ -1,0 +1,4 @@
+interface:
+  display_name: "Run trello-cli Quality Gate"
+  short_description: "Run formatting, vet, race tests, and harness checks"
+  default_prompt: "Use $quality-gate to validate the repository and report what passed."

@@ -1,0 +1,105 @@
+allow = [
+  "Edit",
+  "Write",
+  "Read",
+  "Glob",
+  "Grep",
+  "Bash(git status:*)",
+  "Bash(git diff:*)",
+  "Bash(git log:*)",
+  "Bash(git show:*)",
+  "Bash(go build:*)",
+  "Bash(go test:*)",
+  "Bash(go vet:*)",
+  "Bash(go doc:*)",
+  "Bash(go list:*)",
+  "Bash(gofmt:*)",
+  "Bash(golangci-lint run:*)",
+  "Bash(python3 .agents/scripts/sync-rules.py --check:*)",
+  "Bash(python3 -m unittest discover -s .agents/tests:*)",
+]
+
+ask = [
+  # Mutates go.mod/go.sum and reaches the network for module downloads.
+  "Bash(go mod tidy:*)",
+  "Bash(go mod download:*)",
+  "Bash(go get:*)",
+  "Bash(go generate:*)",
+  "Bash(go install:*)",
+  "Bash(git commit:*)",
+  "Bash(git push:*)",
+  # `install` and `uninstall` mutate local Git config and are the developer's
+  # call, never the agent's — see .agents/rules/quality-gates.md.
+  "Bash(.githooks/pre-push:*)",
+  "Bash(.githooks/install:*)",
+  "Bash(.githooks/uninstall:*)",
+]
+
+# The write-mode `sync-rules.py` / `compiler.py` invocations are deliberately
+# absent from `ask`. They are prefixes of their own allowed `--check` forms, and
+# the Codex policy compiles `ask` into prefix rules while ignoring `allow`, so
+# an explicit entry would make the read-only checks prompt too. With no entry
+# they fall through to `default_mode = "default"`, which prompts anyway.
+
+# Deny is defense-in-depth, not the security boundary. Claude matches Bash
+# rules on literal command prefixes, so a rewritten equivalent bypasses any
+# entry here. The boundary is that an unlisted command falls through to a
+# prompt in `default` mode, plus the Codex read-only/workspace sandbox profiles.
+deny = [
+  # Local credentials. Read, Write, and Edit are kept symmetric: denying only
+  # Read would still let a blanket-allowed Write clobber a credential file.
+  # Trello tokens belong in the OS keychain or the environment, never on disk
+  # in the repo — see .agents/rules/secrets.md.
+  "Read(./.env*)",
+  "Read(./**/.env*)",
+  "Write(./.env*)",
+  "Write(./**/.env*)",
+  "Edit(./.env*)",
+  "Edit(./**/.env*)",
+  "Read(./.netrc)",
+  "Write(./.netrc)",
+  "Edit(./.netrc)",
+  "Read(./*.pem)",
+  "Read(./**/*.pem)",
+  "Write(./*.pem)",
+  "Write(./**/*.pem)",
+  "Edit(./*.pem)",
+  "Edit(./**/*.pem)",
+  # goreleaser and CI credentials.
+  "Read(./.goreleaser.env)",
+  "Write(./.goreleaser.env)",
+  "Edit(./.goreleaser.env)",
+  # Compiler-owned generated mirrors. Listed as concrete generated paths rather
+  # than a blanket `.claude/**`, because git worktrees live under
+  # `.claude/worktrees/` and must stay editable.
+  "Write(./.claude/agents/**)",
+  "Write(./.claude/rules/**)",
+  "Write(./.claude/hooks/**)",
+  "Write(./.claude/skills/**)",
+  "Write(./.claude/settings.json)",
+  "Edit(./.claude/agents/**)",
+  "Edit(./.claude/rules/**)",
+  "Edit(./.claude/hooks/**)",
+  "Edit(./.claude/skills/**)",
+  "Edit(./.claude/settings.json)",
+  "Write(./.codex/**)",
+  "Edit(./.codex/**)",
+  # Destructive git and filesystem prefixes, including common spellings.
+  "Bash(git reset --hard:*)",
+  "Bash(git clean:*)",
+  "Bash(git push --force:*)",
+  "Bash(git push -f:*)",
+  # Prefix rules alone cannot cover every spelling of a push that skips the
+  # gate; the `pre_push_guard` hook in hooks.toml is the real enforcement and
+  # parses the command. These entries stop the two literal forms earlier.
+  "Bash(git push --no-verify:*)",
+  "Bash(git config --local core.hooksPath:*)",
+  "Bash(git checkout --orphan:*)",
+  "Bash(rm -rf:*)",
+  "Bash(rm -fr:*)",
+  "Bash(rm -Rf:*)",
+  "Bash(rm -r -f:*)",
+  "Bash(rm -f -r:*)",
+  "Bash(sudo:*)",
+  "Bash(chmod 777:*)",
+]

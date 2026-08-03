@@ -1,0 +1,10 @@
+name = "codex"
+config_dir = ".codex"
+settings_file = "config.toml"
+instructions_file = "AGENTS.md"
+agent_dir = "agents"
+policy_file = "rules/generated-policy.rules"
+sandbox_mode = "workspace-write"
+max_threads = 4
+max_depth = 2
+python_command = "${AGENT_HARNESS_PYTHON:-python3}"

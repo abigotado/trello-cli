@@ -1,0 +1,70 @@
+# Machine contract
+
+The command surface is this project's public API. Its consumers are AI agents
+that cannot notice a silent change, so treat every item here as breaking unless
+it is purely additive.
+
+**Precedence:** this file is the specification. `internal/errx` is the
+implementation of record, and `docs/contract.md` plus
+`assets/skills/reference/contract.md` are generated from `internal/errx` by
+`go generate`. When the generated output disagrees with this file, this file
+wins and `internal/errx` is the thing that gets fixed.
+
+## Envelope
+
+```json
+{"ok":true,"v":1,"data":{},"meta":{"count":3,"truncated":false}}
+{"ok":false,"v":1,"error":{"code":"AMBIGUOUS_BOARD","message":"","candidates":[]},"hint":"pass --board-id"}
+```
+
+- `ok`, `v`, `data`, `meta`, `error.code`, `error.message`, `hint` keep their
+  names, types, and nullability.
+- Adding a field is additive. Renaming, removing, or changing the type of one
+  requires bumping `v`.
+- `error.code` is a stable `SCREAMING_SNAKE_CASE` string. It is where new
+  granularity goes — prefer a new code over a new exit code.
+- `hint` is written for a machine reader: it states the next action
+  (`pass --board-id`), not an apology.
+
+## Exit codes
+
+Each code maps to a **distinct recovery action**. That is the test for whether a
+new one is justified; if the caller's next move is the same, it is a new
+`error.code`, not a new exit code.
+
+| Code | Meaning | Caller's next move |
+| --- | --- | --- |
+| 0 | ok | proceed |
+| 1 | internal failure | report, do not retry |
+| 2 | usage / validation | fix flags |
+| 3 | not found | check the name; `did_you_mean` is in the envelope |
+| 4 | ambiguous | pick from `candidates` |
+| 5 | auth | re-authenticate |
+| 6 | retryable (rate limit, network) | back off, retry |
+| 7 | confirmation required | add `--yes` |
+
+Two hazards that are easy to reintroduce:
+
+- **A compiled Go binary exits `2` when it panics.** `main` must install a
+  `recover()` that maps panics to `1`. Never assign a semantic meaning to `2`
+  that would make a crash look like a retryable result.
+- **Cobra returns a bare `1` on flag-parse errors** unless the root command sets
+  `SilenceUsage` and a `SetFlagErrorFunc` that routes through `errx`.
+
+## Flags
+
+- Names, shorthands, and defaults are contract. A rename ships with a hidden
+  alias for the old spelling.
+- Name-or-ID pairs are `--board` and `--board-id`, never `--boardName`.
+- Output is `-o/--output {text,json,raw}` plus `--fields`. `--json` is a
+  retained hidden alias.
+- **Output defaults to `json` when stdout is not a TTY.** Do not make an agent
+  remember a flag to get parseable output.
+- Every mutating command accepts `--dry-run` and `--yes`, registered by the
+  shared command helper rather than per command.
+
+## Output economy
+
+Context is the scarce resource. Default output is one compact line per entity
+with a minimal field set. Raw Trello REST JSON is never the default — it is
+`-o raw`, opt-in. A command that dumps unfiltered API responses is a bug.

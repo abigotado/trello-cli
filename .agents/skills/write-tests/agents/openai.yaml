@@ -1,0 +1,4 @@
+interface:
+  display_name: "Write trello-cli Tests"
+  short_description: "Add boundary tests for changed trello-cli behavior"
+  default_prompt: "Use $write-tests to cover the changed trello-cli behavior with table-driven tests."
