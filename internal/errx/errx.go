@@ -8,6 +8,7 @@
 package errx
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"time"
@@ -65,6 +66,45 @@ func (e *Error) Wrap(err error) *Error {
 func (e *Error) WithHint(format string, args ...any) *Error {
 	e.Hint = fmt.Sprintf(format, args...)
 	return e
+}
+
+// Translate converts errors that are not ours but are nonetheless expected
+// into contract errors.
+//
+// Context errors are the case that matters. A timeout returned raw is untyped,
+// so [ExitCode] reports it as [CodeInternal] — telling the caller a slow
+// network is a defect in this tool and that retrying is pointless. Both
+// conclusions are wrong, and an agent acting on them gives up permanently on a
+// transient condition.
+//
+// Call this at the boundary where an error becomes an exit code. Errors that
+// are already typed, or that mean nothing to the contract, are returned
+// unchanged.
+func Translate(err error) error {
+	if err == nil {
+		return nil
+	}
+	var typed *Error
+	if errors.As(err, &typed) {
+		return err
+	}
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return (&Error{
+			Code:    CodeRetryable,
+			Reason:  "TIMEOUT",
+			Message: "the command exceeded its time budget",
+			Hint:    "raise --timeout or TRELLO_CLI_TIMEOUT, then retry",
+		}).Wrap(err)
+	case errors.Is(err, context.Canceled):
+		return (&Error{
+			Code:    CodeRetryable,
+			Reason:  "CANCELED",
+			Message: "the command was interrupted before it finished",
+			Hint:    "re-run the command",
+		}).Wrap(err)
+	}
+	return err
 }
 
 // ExitCode reports the process exit status for err.

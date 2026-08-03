@@ -6,8 +6,8 @@ it is purely additive.
 
 **Precedence:** this file is the specification. `internal/errx` is the
 implementation of record, and `docs/contract.md` plus
-`assets/skills/reference/contract.md` are generated from `internal/errx` by
-`go generate`. When the generated output disagrees with this file, this file
+`assets/skills/trello/reference/contract.md` are generated from `internal/errx`
+by `go generate`. When the generated output disagrees with this file, this file
 wins and `internal/errx` is the thing that gets fixed.
 
 ## Envelope

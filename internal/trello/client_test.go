@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -326,6 +327,144 @@ func TestParseRetryAfter(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := parseRetryAfter(tt.value); got != tt.want {
 				t.Errorf("parseRetryAfter(%q) = %v, want %v", tt.value, got, tt.want)
+			}
+		})
+	}
+}
+
+// The exit-code contract exists to tell a caller whether to retry. A timeout
+// is the most common transient failure this tool has, and returning ctx.Err()
+// raw made it exit 1 with "do not retry". This is the test that fails if the
+// translation is ever removed.
+func TestTimeoutIsRetryableNotInternal(t *testing.T) {
+	block := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-block:
+		case <-r.Context().Done():
+		}
+	}))
+	defer func() { close(block); srv.Close() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	c := New(srv.URL, Credentials{APIKey: "k", Token: "t"}, 1, WithHTTPClient(srv.Client()))
+	_, err := c.Me(ctx)
+	if err == nil {
+		t.Fatal("expected a timeout error")
+	}
+	if got := errx.ExitCode(err); got != errx.CodeRetryable {
+		t.Errorf("exit code = %d, want %d (retryable); a timeout must never be reported as an internal defect", got, errx.CodeRetryable)
+	}
+	var typed *errx.Error
+	if errors.As(err, &typed) && typed.Reason != "TIMEOUT" {
+		t.Errorf("reason = %q, want TIMEOUT", typed.Reason)
+	}
+	// The cause must survive so callers can still match on it.
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Error("the underlying context error was dropped")
+	}
+}
+
+// testing.md names "429 with and without Retry-After". Without the header the
+// only thing standing between a rate-limited key and a retry storm is the
+// backoff schedule, which had no coverage.
+func TestRateLimitWithoutRetryAfterUsesExponentialBackoff(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":"API_KEY_LIMIT_EXCEEDED"}`))
+	}))
+	defer srv.Close()
+
+	c, slept := newTestClient(t, srv)
+	if _, err := c.Me(context.Background()); err == nil {
+		t.Fatal("expected an error")
+	}
+	// maxAttempts sends, so maxAttempts-1 sleeps, doubling each time.
+	want := []time.Duration{500 * time.Millisecond, time.Second}
+	if len(*slept) != len(want) {
+		t.Fatalf("slept %v, want %v", *slept, want)
+	}
+	for i, d := range want {
+		if (*slept)[i] != d {
+			t.Errorf("sleep %d = %v, want %v", i, (*slept)[i], d)
+		}
+	}
+}
+
+func TestRetryAfterAcceptsAFutureHTTPDate(t *testing.T) {
+	future := time.Now().UTC().Add(30 * time.Second).Format(http.TimeFormat)
+	got := parseRetryAfter(future)
+	if got <= 0 || got > 31*time.Second {
+		t.Errorf("parseRetryAfter(future date) = %v, want roughly 30s", got)
+	}
+}
+
+// isSerialRoute is only a predicate; this asserts do() actually honors it.
+// Two concurrent searches must not overlap on the server, while two nested
+// member routes must, or the resolver's fan-out is pointlessly serialized.
+func TestSerialRoutesDoNotOverlap(t *testing.T) {
+	tests := []struct {
+		name        string
+		path        string
+		wantOverlap bool
+	}{
+		{"search serializes", "search", false},
+		{"nested member route runs in parallel", "members/me/boards", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var mu sync.Mutex
+			var inFlight, peak int
+			release := make(chan struct{})
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				mu.Lock()
+				inFlight++
+				if inFlight > peak {
+					peak = inFlight
+				}
+				mu.Unlock()
+				<-release
+				mu.Lock()
+				inFlight--
+				mu.Unlock()
+				_, _ = w.Write([]byte(`{}`))
+			}))
+			defer srv.Close()
+
+			c, _ := newTestClient(t, srv)
+			var wg sync.WaitGroup
+			for i := 0; i < 2; i++ {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					var out map[string]any
+					_ = c.Get(context.Background(), tt.path, nil, &out)
+				}()
+			}
+			// Give both goroutines time to reach the server before releasing.
+			deadline := time.Now().Add(2 * time.Second)
+			for {
+				mu.Lock()
+				reached := peak
+				mu.Unlock()
+				if reached == 2 || time.Now().After(deadline) {
+					break
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
+			close(release)
+			wg.Wait()
+
+			mu.Lock()
+			got := peak
+			mu.Unlock()
+			if tt.wantOverlap && got != 2 {
+				t.Errorf("peak in-flight = %d, want 2: nested routes are exempt and must stay parallel", got)
+			}
+			if !tt.wantOverlap && got != 1 {
+				t.Errorf("peak in-flight = %d, want 1: this route must be serialized", got)
 			}
 		})
 	}

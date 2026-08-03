@@ -33,6 +33,17 @@ func (f *fakeStore) Load(context.Context) (Credentials, error) {
 func (f *fakeStore) Save(context.Context, Credentials) error { return nil }
 func (f *fakeStore) Delete(context.Context) error            { return nil }
 
+// mockKeyring swaps in go-keyring's in-memory provider and clears the entry
+// afterwards. Without it these tests would hit the real OS keychain: a modal
+// prompt on macOS, and a D-Bus failure or hang on a Linux CI runner. The
+// cleanup matters because MockInit is process-global, so a leftover entry
+// leaks into whichever test runs next.
+func mockKeyring(t *testing.T) {
+	t.Helper()
+	keyring.MockInit()
+	t.Cleanup(func() { _ = keyring.Delete(KeyringService, keyringUser) })
+}
+
 func TestResolveOrder(t *testing.T) {
 	stored := Credentials{APIKey: "stored-key", Token: "stored-token"}
 
@@ -176,7 +187,7 @@ func TestCredentialsValid(t *testing.T) {
 // would hit the real OS keychain: a modal prompt on macOS, and a D-Bus failure
 // or hang on a Linux CI runner.
 func TestKeyringStoreRoundTrip(t *testing.T) {
-	keyring.MockInit()
+	mockKeyring(t)
 	ctx := context.Background()
 	store := KeyringStore{}
 
@@ -212,7 +223,7 @@ func TestKeyringStoreRoundTrip(t *testing.T) {
 }
 
 func TestKeyringStoreRejectsPartialCredentials(t *testing.T) {
-	keyring.MockInit()
+	mockKeyring(t)
 	err := KeyringStore{}.Save(context.Background(), Credentials{APIKey: "only-key"})
 	if errx.ExitCode(err) != errx.CodeUsage {
 		t.Errorf("exit code = %d, want %d (usage)", errx.ExitCode(err), errx.CodeUsage)
@@ -220,7 +231,7 @@ func TestKeyringStoreRejectsPartialCredentials(t *testing.T) {
 }
 
 func TestKeyringStoreReportsCorruptEntry(t *testing.T) {
-	keyring.MockInit()
+	mockKeyring(t)
 	if err := keyring.Set(KeyringService, keyringUser, "not json"); err != nil {
 		t.Fatalf("seeding the keychain failed: %v", err)
 	}
@@ -231,7 +242,7 @@ func TestKeyringStoreReportsCorruptEntry(t *testing.T) {
 }
 
 func TestCancelledContextStopsKeychainAccess(t *testing.T) {
-	keyring.MockInit()
+	mockKeyring(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if _, err := (KeyringStore{}).Load(ctx); !errors.Is(err, context.Canceled) {

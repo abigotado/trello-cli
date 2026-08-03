@@ -62,12 +62,69 @@ func TestSuccessEnvelopeShape(t *testing.T) {
 	if _, ok := env["error"]; ok {
 		t.Error("a successful envelope must not carry an error key")
 	}
-	meta, ok := env["meta"].(map[string]any)
-	if !ok {
-		t.Fatalf("meta missing: %v", env["meta"])
+	// meta means "this is a countable collection". A single object must not
+	// carry it, or an agent cannot use its presence to tell a list from an
+	// object without knowing every command by name.
+	if _, ok := env["meta"]; ok {
+		t.Errorf("a single object must not carry meta, got %v", env["meta"])
 	}
-	if meta["count"] != float64(1) {
-		t.Errorf("meta.count = %v, want 1", meta["count"])
+}
+
+func TestMetaMarksCollectionsOnly(t *testing.T) {
+	tests := []struct {
+		name     string
+		data     any
+		wantMeta bool
+		wantN    float64
+	}{
+		{"single object has no meta", card{id: "1"}, false, 0},
+		{"slice of two has meta", []card{{id: "1"}, {id: "2"}}, true, 2},
+		{"empty slice still has meta", []card{}, true, 0},
+		{"non-renderable payload has no meta", struct{ A int }{1}, false, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w, out, _ := newWriter(FormatJSON, nil)
+			if err := w.Success(tt.data); err != nil {
+				t.Fatalf("Success() error = %v", err)
+			}
+			var env map[string]any
+			if err := json.Unmarshal(out.Bytes(), &env); err != nil {
+				t.Fatalf("bad JSON: %v\n%s", err, out.String())
+			}
+			meta, has := env["meta"].(map[string]any)
+			if has != tt.wantMeta {
+				t.Fatalf("meta present = %v, want %v (envelope: %s)", has, tt.wantMeta, out.String())
+			}
+			if tt.wantMeta && meta["count"] != tt.wantN {
+				t.Errorf("meta.count = %v, want %v", meta["count"], tt.wantN)
+			}
+		})
+	}
+}
+
+// Go slices are not covariant: a []card does not type-assert to []Renderable
+// even though card implements it. The original code used that assertion, so
+// every future list command would have silently lost meta and had --fields
+// start reporting "not supported" — with no compile error and no panic.
+func TestConcreteSliceIsRecognizedAsACollection(t *testing.T) {
+	w, out, _ := newWriter(FormatJSON, []string{"id"})
+	// Deliberately a []card, not a []Renderable.
+	if err := w.Success([]card{{id: "1"}, {id: "2"}}); err != nil {
+		t.Fatalf("Success() on a concrete slice failed: %v", err)
+	}
+	var env struct {
+		Data []map[string]any `json:"data"`
+		Meta *Meta            `json:"meta"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &env); err != nil {
+		t.Fatalf("bad JSON: %v\n%s", err, out.String())
+	}
+	if env.Meta == nil || env.Meta.Count != 2 {
+		t.Errorf("meta = %+v, want count 2", env.Meta)
+	}
+	if len(env.Data) != 2 {
+		t.Errorf("data has %d rows, want 2", len(env.Data))
 	}
 }
 
@@ -310,5 +367,70 @@ func TestDefaultFormatIsJSONWhenStdoutIsNotATerminal(t *testing.T) {
 	closed.Close()
 	if got := DefaultFormat(closed); got != FormatJSON {
 		t.Errorf("DefaultFormat(unstattable) = %q, want %q", got, FormatJSON)
+	}
+}
+
+// The same typo used to be a usage error in json and a silently dropped column
+// in text. One flag must not have two contracts depending on -o.
+func TestUnknownFieldIsAUsageErrorInEveryFormat(t *testing.T) {
+	tests := []struct {
+		format Format
+		fields []string
+	}{
+		{FormatJSON, []string{"bogus"}},
+		{FormatText, []string{"bogus"}},
+		{FormatJSON, []string{"id", "bogus"}},
+		{FormatText, []string{"id", "bogus"}},
+	}
+	for _, tt := range tests {
+		t.Run(string(tt.format)+"/"+strings.Join(tt.fields, ","), func(t *testing.T) {
+			w, out, _ := newWriter(tt.format, tt.fields)
+			err := w.Success(card{id: "1", name: "A"})
+			if errx.ExitCode(err) != errx.CodeUsage {
+				t.Fatalf("exit code = %d, want %d; stdout was %q", errx.ExitCode(err), errx.CodeUsage, out.String())
+			}
+			if !strings.Contains(err.Error(), "bogus") {
+				t.Errorf("error should name the offending field, got %q", err.Error())
+			}
+		})
+	}
+}
+
+// Accepting --fields under -o raw and discarding it would give one flag a
+// third behavior.
+func TestFieldsIsRejectedWithRawOutput(t *testing.T) {
+	w, _, _ := newWriter(FormatRaw, []string{"id"})
+	err := w.Success(card{id: "1"})
+	if errx.ExitCode(err) != errx.CodeUsage {
+		t.Errorf("exit code = %d, want %d", errx.ExitCode(err), errx.CodeUsage)
+	}
+}
+
+// --fields must not change the shape of data. If a single object became a
+// one-element array only when projected, an agent could not write one parser.
+func TestProjectionPreservesObjectVersusArrayShape(t *testing.T) {
+	single, out, _ := newWriter(FormatJSON, []string{"id"})
+	if err := single.Success(card{id: "1"}); err != nil {
+		t.Fatalf("Success() error = %v", err)
+	}
+	var env struct {
+		Data json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &env); err != nil {
+		t.Fatalf("bad JSON: %v", err)
+	}
+	if !strings.HasPrefix(strings.TrimSpace(string(env.Data)), "{") {
+		t.Errorf("a projected single object must stay an object, got %s", env.Data)
+	}
+
+	list, out2, _ := newWriter(FormatJSON, []string{"id"})
+	if err := list.Success([]card{{id: "1"}}); err != nil {
+		t.Fatalf("Success() error = %v", err)
+	}
+	if err := json.Unmarshal(out2.Bytes(), &env); err != nil {
+		t.Fatalf("bad JSON: %v", err)
+	}
+	if !strings.HasPrefix(strings.TrimSpace(string(env.Data)), "[") {
+		t.Errorf("a projected collection must stay an array, got %s", env.Data)
 	}
 }

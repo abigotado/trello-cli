@@ -68,12 +68,30 @@ func (a *App) newAuthLoginCommand() *cobra.Command {
 			"Get an API key at https://trello.com/power-ups/admin and a token by\n" +
 			"authorizing it. TRELLO_API_KEY and TRELLO_TOKEN always take precedence over\n" +
 			"anything stored here, and are the right choice for CI and headless agents.",
-		Args: cobra.NoArgs,
+		// Not cobra.NoArgs: its message embeds the offending argument, and a
+		// positional is exactly what someone reaches for first on a login
+		// command. `auth login MY-TOKEN` would then echo the credential into
+		// the error envelope on stdout, the agent transcript, and any log that
+		// captures them.
+		Args: func(*cobra.Command, []string) error {
+			return nil // validated below without echoing the value
+		},
+		Annotations: map[string]string{
+			// login writes the same stored credential logout removes, so both
+			// must answer to TRELLO_CLI_READONLY. Without this, locking the
+			// tool down blocks logout while still allowing a credential write.
+			annotationMutates: "true",
+		},
 	}
 	cmd.Flags().StringVar(&apiKey, "api-key", "", "Trello API key")
 	cmd.Flags().StringVar(&token, "token", "", "Trello API token")
 
-	return a.newCommand(cmd, func(ctx context.Context, _ *cobra.Command, _ []string) error {
+	return a.newCommand(cmd, func(ctx context.Context, _ *cobra.Command, args []string) error {
+		// Deliberately does not quote or echo the argument: it is very likely
+		// to be the token itself.
+		if len(args) > 0 {
+			return errx.Usage("auth login takes no positional arguments; pass credentials with --api-key and --token")
+		}
 		if apiKey == "" || token == "" {
 			return errx.Usage("both --api-key and --token are required")
 		}

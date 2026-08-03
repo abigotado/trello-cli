@@ -3,6 +3,7 @@ package trello
 import (
 	"context"
 	"net/url"
+	"strings"
 )
 
 // Member is a Trello user.
@@ -28,20 +29,9 @@ var memberFields = []string{"id", "username", "fullName", "email", "url", "initi
 // Me returns the authenticated member.
 func (c *Client) Me(ctx context.Context) (Member, error) {
 	var m Member
-	q := url.Values{"fields": {joinFields(memberFields)}}
+	q := url.Values{"fields": {strings.Join(memberFields, ",")}}
 	if err := c.Get(ctx, "members/me", q, &m); err != nil {
 		return Member{}, err
 	}
 	return m, nil
-}
-
-func joinFields(fields []string) string {
-	out := ""
-	for i, f := range fields {
-		if i > 0 {
-			out += ","
-		}
-		out += f
-	}
-	return out
 }

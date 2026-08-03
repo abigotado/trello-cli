@@ -282,3 +282,136 @@ func TestJSONAliasSelectsJSON(t *testing.T) {
 		t.Errorf("--json did not produce JSON: %v\n%s", err, h.out())
 	}
 }
+
+// `auth login MY-TOKEN` is the first thing someone tries. cobra.NoArgs embeds
+// the offending argument in its message, which would put a live credential in
+// the error envelope on stdout, the agent transcript, and any capturing log.
+func TestAuthLoginNeverEchoesAPositionalArgument(t *testing.T) {
+	const secret = "SECRET-TOKEN-abc123"
+	h := newHarness(t, nil, nil)
+
+	if got := h.run("auth", "login", secret); got != errx.CodeUsage {
+		t.Fatalf("exit code = %d, want %d (usage)", got, errx.CodeUsage)
+	}
+	combined := h.out() + h.err()
+	if strings.Contains(combined, secret) {
+		t.Errorf("the rejected argument was echoed back:\n%s", combined)
+	}
+	if !strings.Contains(combined, "--api-key") {
+		t.Errorf("the error should point at the correct flags:\n%s", combined)
+	}
+}
+
+// login and logout write the same stored credential, so both must answer to
+// read-only mode. Gating only logout meant locking the tool down still allowed
+// a credential write.
+func TestReadOnlyBlocksLoginAndLogoutAlike(t *testing.T) {
+	for _, args := range [][]string{
+		{"auth", "logout"},
+		{"auth", "login", "--api-key", "k", "--token", "t"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			store := &fakeStore{}
+			h := newHarness(t, map[string]string{"TRELLO_CLI_READONLY": "1"}, store)
+			if got := h.run(args...); got != errx.CodeUsage {
+				t.Errorf("exit code = %d, want %d (usage)", got, errx.CodeUsage)
+			}
+			if store.saved != nil || store.deleted {
+				t.Error("read-only mode still let the command touch the store")
+			}
+		})
+	}
+}
+
+func TestAuthLoginStoresTheGivenCredentials(t *testing.T) {
+	store := &fakeStore{}
+	h := newHarness(t, nil, store)
+
+	if got := h.run("auth", "login", "--api-key", "key-1", "--token", "tok-1"); got != errx.CodeOK {
+		t.Fatalf("exit code = %d, want 0\nstderr: %s", got, h.err())
+	}
+	if store.saved == nil {
+		t.Fatal("login did not write to the store")
+	}
+	if store.saved.APIKey != "key-1" || store.saved.Token != "tok-1" {
+		t.Errorf("stored %+v, want key-1/tok-1", *store.saved)
+	}
+	// The success envelope must not contain the token it just stored.
+	if strings.Contains(h.out()+h.err(), "tok-1") {
+		t.Error("login echoed the stored token")
+	}
+}
+
+func TestAuthLoginDryRunDoesNotStore(t *testing.T) {
+	store := &fakeStore{}
+	h := newHarness(t, nil, store)
+	if got := h.run("--dry-run", "auth", "login", "--api-key", "k", "--token", "t"); got != errx.CodeOK {
+		t.Fatalf("exit code = %d, want 0", got)
+	}
+	if store.saved != nil {
+		t.Error("--dry-run wrote credentials to the store")
+	}
+}
+
+// End-to-end counterpart of the transport test: a timeout must reach the
+// caller as retryable, not as an internal defect it is told never to retry.
+func TestTimeoutReachesTheCallerAsRetryable(t *testing.T) {
+	block := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		select {
+		case <-block:
+		case <-r.Context().Done():
+		}
+	}))
+	defer func() { close(block); srv.Close() }()
+
+	h := newHarness(t, map[string]string{
+		auth.EnvAPIKey:        "k",
+		auth.EnvToken:         "t",
+		"TRELLO_CLI_BASE_URL": srv.URL,
+		"TRELLO_CLI_TIMEOUT":  "80ms",
+	}, nil)
+
+	if got := h.run("me"); got != errx.CodeRetryable {
+		t.Fatalf("exit code = %d, want %d (retryable)\nstdout: %s", got, errx.CodeRetryable, h.out())
+	}
+	if strings.Contains(h.out(), "do not retry") {
+		t.Errorf("a timeout told the caller not to retry:\n%s", h.out())
+	}
+}
+
+// 429 must surface through the whole stack with the server's error code and a
+// retry_after the caller can act on.
+func TestRateLimitReachesTheCallerWithRetryAfter(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "1")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":"API_TOKEN_LIMIT_EXCEEDED","message":"Rate limit exceeded"}`))
+	}))
+	defer srv.Close()
+
+	h := newHarness(t, map[string]string{
+		auth.EnvAPIKey:        "k",
+		auth.EnvToken:         "t",
+		"TRELLO_CLI_BASE_URL": srv.URL,
+	}, nil)
+
+	if got := h.run("me"); got != errx.CodeRetryable {
+		t.Fatalf("exit code = %d, want %d\nstdout: %s", got, errx.CodeRetryable, h.out())
+	}
+	var env struct {
+		Error struct {
+			Code       string `json:"code"`
+			RetryAfter string `json:"retry_after"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(h.out()), &env); err != nil {
+		t.Fatalf("bad envelope: %v\n%s", err, h.out())
+	}
+	if env.Error.Code != "API_TOKEN_LIMIT_EXCEEDED" {
+		t.Errorf("error.code = %q, want the server's code", env.Error.Code)
+	}
+	if env.Error.RetryAfter == "" {
+		t.Error("retry_after is empty; the caller has nothing to back off by")
+	}
+}

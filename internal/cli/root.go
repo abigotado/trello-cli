@@ -181,8 +181,13 @@ func (a *App) trelloClient(ctx context.Context) (*trello.Client, error) {
 // newCommand builds a command with the shared rails already attached.
 //
 // Every command must be built through this. One assembled by hand silently
-// opts out of --dry-run, the confirmation gate, and read-only mode, and the
-// omission is invisible until someone deletes the wrong card.
+// opts out of the read-only gate and the confirmation gate, and the omission is
+// invisible until someone deletes the wrong card.
+//
+// --dry-run is deliberately not enforced here. What a dry run should print is
+// specific to each command — which names resolved to which ids — so the
+// middleware cannot produce it. It gates the mutating call inside each command
+// body instead, and the tests for those commands are what hold that line.
 func (a *App) newCommand(cmd *cobra.Command, run func(context.Context, *cobra.Command, []string) error) *cobra.Command {
 	cmd.Args = usageArgs(cmd.Args)
 	inner := run
@@ -266,6 +271,11 @@ func (a *App) Run(ctx context.Context, root *cobra.Command, args []string) (code
 	if err == nil {
 		return errx.CodeOK
 	}
+	// Single boundary where an error becomes an exit code. Context errors
+	// arrive here untyped from any layer that returned ctx.Err() directly, and
+	// without translation a timeout would be reported as an internal defect
+	// the caller must not retry.
+	err = errx.Translate(err)
 	// setup may have failed before a writer existed.
 	if a.out == nil {
 		a.out = &output.Writer{Format: output.DefaultFormat(a.stdout), Out: a.stdout, Err: a.stderr}

@@ -128,28 +128,28 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 		case c.sem <- struct{}{}:
 			defer func() { <-c.sem }()
 		case <-ctx.Done():
-			return ctx.Err()
+			return errx.Translate(ctx.Err())
 		}
 	}
 
 	var lastErr error
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		if err := c.awaitPace(ctx); err != nil {
-			return err
+			return errx.Translate(err)
 		}
 		resp, err := c.send(ctx, method, path, query, payload)
 		if err != nil {
 			// A cancelled or timed-out context is the caller's decision, not a
 			// transport failure to retry against.
 			if ctx.Err() != nil {
-				return ctx.Err()
+				return errx.Translate(ctx.Err())
 			}
 			lastErr = errx.Retryable("NETWORK", 0, "%s %s: %v", method, path, redact(err)).Wrap(err)
 			if attempt == maxAttempts {
 				return lastErr
 			}
 			if err := c.sleep(ctx, c.backoff(attempt)); err != nil {
-				return err
+				return errx.Translate(err)
 			}
 			continue
 		}
@@ -168,7 +168,7 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 		}
 		c.log.Debug("retrying", "method", method, "path", path, "attempt", attempt, "delay", delay)
 		if err := c.sleep(ctx, delay); err != nil {
-			return err
+			return errx.Translate(err)
 		}
 	}
 	return lastErr
@@ -312,6 +312,7 @@ func (c *Client) backoff(attempt int) time.Duration {
 // in the whole tool, for no reason.
 func isSerialRoute(path string) bool {
 	p := strings.Trim(path, "/")
+	p = strings.TrimPrefix(p, "1/")
 	if p == "search" || strings.HasPrefix(p, "search/") {
 		return true
 	}

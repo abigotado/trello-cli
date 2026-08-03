@@ -1,6 +1,7 @@
 package errx
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"testing"
@@ -136,5 +137,55 @@ func TestUnwrapExposesTheCause(t *testing.T) {
 	err := Retryable("NETWORK", 0, "request failed").Wrap(cause)
 	if !errors.Is(err, cause) {
 		t.Error("errors.Is could not reach the wrapped cause")
+	}
+}
+
+// A timeout returned raw from any layer is untyped, so without translation it
+// reports as CodeInternal with the hint "do not retry". An agent on a slow
+// network would then give up permanently on a transient condition.
+func TestTranslateContextErrors(t *testing.T) {
+	tests := []struct {
+		name       string
+		err        error
+		wantCode   Code
+		wantReason string
+	}{
+		{"deadline exceeded is retryable", context.DeadlineExceeded, CodeRetryable, "TIMEOUT"},
+		{"wrapped deadline is retryable", fmt.Errorf("get: %w", context.DeadlineExceeded), CodeRetryable, "TIMEOUT"},
+		{"cancellation is retryable", context.Canceled, CodeRetryable, "CANCELED"},
+		{"nil stays nil", nil, CodeOK, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := Translate(tt.err)
+			if ExitCode(got) != tt.wantCode {
+				t.Errorf("exit code = %d, want %d", ExitCode(got), tt.wantCode)
+			}
+			if tt.wantReason == "" {
+				return
+			}
+			var typed *Error
+			if !errors.As(got, &typed) {
+				t.Fatalf("Translate() = %v, want an *Error", got)
+			}
+			if typed.Reason != tt.wantReason {
+				t.Errorf("reason = %q, want %q", typed.Reason, tt.wantReason)
+			}
+			if !errors.Is(got, tt.err) {
+				t.Error("Translate() dropped the underlying cause")
+			}
+		})
+	}
+}
+
+// Translation must not rewrite an error that already carries a code.
+func TestTranslateLeavesTypedErrorsAlone(t *testing.T) {
+	original := Auth("NOT_AUTHENTICATED", "no credentials")
+	if got := Translate(original); got != error(original) {
+		t.Errorf("Translate() rewrote a typed error: %v", got)
+	}
+	unrelated := errors.New("something else")
+	if got := Translate(unrelated); got != unrelated {
+		t.Errorf("Translate() rewrote an unrelated error: %v", got)
 	}
 }
