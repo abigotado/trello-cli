@@ -23,9 +23,15 @@ func (a *App) newVersionCommand() *cobra.Command {
 			Short: "Print the build this binary was produced from",
 			Long: "Print the version, commit, and toolchain of this binary.\n\n" +
 				"Everything here is read from the build information the Go toolchain\n" +
-				"embeds, so it is correct for a binary installed with 'go install' as\n" +
-				"well as for one unpacked from a release archive. There are no ldflags:\n" +
-				"a value injected at link time would only ever reach the second.\n\n" +
+				"embeds. There are no ldflags: a value injected at link time would\n" +
+				"only ever reach a binary the release pipeline built, never one a\n" +
+				"user installed with 'go install'.\n\n" +
+				"The version is always reported. Commit and commitTime are empty\n" +
+				"for a 'go install' build, which compiles the module zip the proxy\n" +
+				"serves and so has no VCS history to read; quote the version when\n" +
+				"reporting a bug against one. A binary from a release archive or a\n" +
+				"local checkout carries both, and one built from a modified tree\n" +
+				"reports a version ending in '+dirty'.\n\n" +
 				"This answers a different question from 'trello-cli contract'. The\n" +
 				"contract describes the output shape, which many builds share; this\n" +
 				"names one build.",

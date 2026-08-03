@@ -1230,6 +1230,7 @@ func TestBuildVersionReadsTheStamp(t *testing.T) {
 		ok         bool
 		wantVer    string
 		wantCommit string
+		wantTime   string
 	}{
 		{
 			name: "a tagged build reports its tag",
@@ -1242,6 +1243,23 @@ func TestBuildVersionReadsTheStamp(t *testing.T) {
 				},
 			},
 			ok: true, wantVer: "v0.1.0", wantCommit: "abc123",
+			wantTime: "2026-08-03T00:00:00Z",
+		},
+		{
+			// The toolchain appends "+dirty" itself when the tree was
+			// modified. Passing it through unchanged is what keeps a bug
+			// report from claiming a build that was never committed; the
+			// help text promises this spelling.
+			name: "a modified tree keeps the +dirty suffix",
+			info: &debug.BuildInfo{
+				GoVersion: "go1.24.1",
+				Main:      debug.Module{Version: "v0.1.0+dirty"},
+				Settings: []debug.BuildSetting{
+					{Key: "vcs.revision", Value: "abc123"},
+					{Key: "vcs.modified", Value: "true"},
+				},
+			},
+			ok: true, wantVer: "v0.1.0+dirty", wantCommit: "abc123",
 		},
 		{
 			// go install from the module proxy has no VCS information at all.
@@ -1272,6 +1290,12 @@ func TestBuildVersionReadsTheStamp(t *testing.T) {
 			}
 			if got.Commit != tt.wantCommit {
 				t.Errorf("commit = %q, want %q", got.Commit, tt.wantCommit)
+			}
+			// Empty is the documented answer for a go install build, so it is
+			// asserted rather than skipped: the help text tells the reader to
+			// expect it.
+			if got.CommitTime != tt.wantTime {
+				t.Errorf("commitTime = %q, want %q", got.CommitTime, tt.wantTime)
 			}
 			if got.Go == "" || got.OS == "" || got.Arch == "" {
 				t.Errorf("toolchain fields are incomplete: %+v", got)

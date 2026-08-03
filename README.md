@@ -44,7 +44,10 @@ shasum -a 256 -c trello-cli_VERSION_checksums.txt --ignore-missing
 ```
 
 There is no Homebrew formula. `trello-cli version` reports the build any of
-these produced, which is the first thing to include in a bug report.
+these produced, which is the first thing to include in a bug report. A download
+or a local checkout also reports the commit it was built from; a `go install`
+build compiles the module zip, which carries no VCS history, so it reports its
+version and leaves `commit` empty.
 
 ## Authenticate
 
