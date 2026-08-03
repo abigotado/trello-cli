@@ -33,9 +33,11 @@ func destructive(cmd *cobra.Command) *cobra.Command {
 // It reports the ids every name resolved to, which is the whole point: a dry
 // run that only echoed the caller's own input back would validate nothing.
 type planView struct {
-	Action  string            `json:"action"`
-	Target  map[string]string `json:"target"`
-	Changes map[string]string `json:"changes,omitempty"`
+	Action string            `json:"action"`
+	Target map[string]string `json:"target"`
+	// No omitempty: -o raw marshals this struct directly while -o json goes
+	// through Fields(), and omitempty would make raw drop a key json keeps.
+	Changes map[string]string `json:"changes"`
 	DryRun  bool              `json:"dryRun"`
 }
 
@@ -250,7 +252,7 @@ func (a *App) cardUpdateCommand() *cobra.Command {
 	cmd.Flags().BoolVar(&dueComplete, "due-complete", false, "mark the due date complete")
 	cmd.Flags().BoolVar(&clearDue, "clear-due", false, "remove the due date")
 
-	return a.newCommand(requiresOneOf(mutating(cmd), "name", "desc", "due", "clear-due", "due-complete"), func(ctx context.Context, c *cobra.Command, _ []string) error {
+	return a.newCommand(requires(requiresOneOf(mutating(cmd), "name", "desc", "due", "clear-due", "due-complete"), "card"), func(ctx context.Context, c *cobra.Command, _ []string) error {
 		if clearDue && c.Flags().Changed("due") {
 			return errx.Usage("--due and --clear-due contradict each other")
 		}
@@ -310,7 +312,7 @@ func (a *App) cardMoveCommand() *cobra.Command {
 	listRef.bind(cmd, "list", "destination list name or id")
 	cmd.Flags().StringVar(&pos, "pos", "", "position in the destination: top, bottom, or a number")
 
-	return a.newCommand(mutating(cmd), func(ctx context.Context, c *cobra.Command, _ []string) error {
+	return a.newCommand(requires(mutating(cmd), "card"), func(ctx context.Context, c *cobra.Command, _ []string) error {
 		board, err := a.boardFor(ctx, boardRef, cardRef, listRef)
 		if err != nil {
 			return err
@@ -357,7 +359,7 @@ func (a *App) cardArchiveCommand() *cobra.Command {
 	cmd.Flags().BoolVar(&restore, "restore", false, "restore an archived card instead")
 
 	// Archiving is reversible from this tool, so it is not destructive.
-	return a.newCommand(mutating(cmd), func(ctx context.Context, _ *cobra.Command, _ []string) error {
+	return a.newCommand(requires(mutating(cmd), "card"), func(ctx context.Context, _ *cobra.Command, _ []string) error {
 		obj, err := a.cardAnywhere(ctx, boardRef, cardRef)
 		if err != nil {
 			return err
@@ -396,7 +398,7 @@ func (a *App) cardDeleteCommand() *cobra.Command {
 	boardRef.bind(cmd, "board", "board to resolve the card name within")
 	cardRef.bind(cmd, "card", "card name, id, or shortLink")
 
-	return a.newCommand(destructive(cmd), func(ctx context.Context, _ *cobra.Command, _ []string) error {
+	return a.newCommand(requires(destructive(cmd), "card"), func(ctx context.Context, _ *cobra.Command, _ []string) error {
 		obj, boardID, err := a.strictCard(ctx, boardRef, cardRef)
 		if err != nil {
 			return err
@@ -484,11 +486,11 @@ func (a *App) labelsWriteCommands() []*cobra.Command {
 	build := func(use, short, action string, remove bool) *cobra.Command {
 		var boardRef, cardRef, labelRef objectRef
 		cmd := &cobra.Command{Use: use, Short: short, Args: cobra.NoArgs}
-		boardRef.bind(cmd, "board", "board name, id, or shortLink")
+		boardRef.bind(cmd, "board", "board holding the label; required unless --label-id is given")
 		cardRef.bind(cmd, "card", "card name, id, or shortLink")
 		labelRef.bind(cmd, "label", "label name or color")
 
-		return a.newCommand(mutating(cmd), func(ctx context.Context, _ *cobra.Command, _ []string) error {
+		return a.newCommand(requires(mutating(cmd), "card", "label"), func(ctx context.Context, _ *cobra.Command, _ []string) error {
 			board, err := a.boardFor(ctx, boardRef, cardRef, labelRef)
 			if err != nil {
 				return err
@@ -535,11 +537,11 @@ func (a *App) membersWriteCommands() []*cobra.Command {
 	build := func(use, short, action string, remove bool) *cobra.Command {
 		var boardRef, cardRef, memberRef objectRef
 		cmd := &cobra.Command{Use: use, Short: short, Args: cobra.NoArgs}
-		boardRef.bind(cmd, "board", "board name, id, or shortLink")
+		boardRef.bind(cmd, "board", "board holding the member; required unless --member-id is given")
 		cardRef.bind(cmd, "card", "card name, id, or shortLink")
 		memberRef.bind(cmd, "member", "member username or id")
 
-		return a.newCommand(mutating(cmd), func(ctx context.Context, _ *cobra.Command, _ []string) error {
+		return a.newCommand(requires(mutating(cmd), "card", "member"), func(ctx context.Context, _ *cobra.Command, _ []string) error {
 			board, err := a.boardFor(ctx, boardRef, cardRef, memberRef)
 			if err != nil {
 				return err
@@ -590,7 +592,7 @@ func (a *App) commentsWriteCommands() []*cobra.Command {
 	cardRef.bind(cmd, "card", "card name, id, or shortLink")
 	cmd.Flags().StringVar(&text, "text", "", "comment body")
 
-	return []*cobra.Command{a.newCommand(requires(mutating(cmd), "text"), func(ctx context.Context, _ *cobra.Command, _ []string) error {
+	return []*cobra.Command{a.newCommand(requires(mutating(cmd), "card", "text"), func(ctx context.Context, _ *cobra.Command, _ []string) error {
 		if text == "" {
 			return errx.Usage("--text is required")
 		}
@@ -621,7 +623,7 @@ func (a *App) checklistsWriteCommands() []*cobra.Command {
 	cardRef.bind(create, "card", "card name, id, or shortLink")
 	create.Flags().StringVar(&name, "name", "", "checklist name")
 
-	createCmd := a.newCommand(requires(mutating(create), "name"), func(ctx context.Context, _ *cobra.Command, _ []string) error {
+	createCmd := a.newCommand(requires(mutating(create), "card", "name"), func(ctx context.Context, _ *cobra.Command, _ []string) error {
 		if name == "" {
 			return errx.Usage("--name is required")
 		}
@@ -681,7 +683,7 @@ func (a *App) checklistsWriteCommands() []*cobra.Command {
 	toggle.Flags().StringVar(&itemID, "item-id", "", "check item id, from 'checklists list'")
 	toggle.Flags().BoolVar(&undone, "undone", false, "mark incomplete instead of complete")
 
-	toggleCmd := a.newCommand(requires(mutating(toggle), "item-id"), func(ctx context.Context, _ *cobra.Command, _ []string) error {
+	toggleCmd := a.newCommand(requires(mutating(toggle), "card", "item-id"), func(ctx context.Context, _ *cobra.Command, _ []string) error {
 		if itemID == "" {
 			return errx.Usage("--item-id is required")
 		}
@@ -722,7 +724,7 @@ func (a *App) attachmentsWriteCommands() []*cobra.Command {
 	cmd.Flags().StringVar(&attachURL, "url", "", "URL to attach")
 	cmd.Flags().StringVar(&name, "name", "", "display name for the attachment")
 
-	return []*cobra.Command{a.newCommand(requires(mutating(cmd), "url"), func(ctx context.Context, _ *cobra.Command, _ []string) error {
+	return []*cobra.Command{a.newCommand(requires(mutating(cmd), "card", "url"), func(ctx context.Context, _ *cobra.Command, _ []string) error {
 		if attachURL == "" {
 			return errx.Usage("--url is required")
 		}

@@ -98,8 +98,10 @@ func describeLeaf(cmd *cobra.Command) leafInfo {
 		Requires:    splitAnnotation(cmd.Annotations["requires"]),
 		RequiresOne: splitAnnotation(cmd.Annotations["requires_one_of"]),
 	}
-	if strings.Contains(cmd.Use, "<") {
-		leaf.Args = cmd.Use
+	// cmd.Use is "default <account>" — the leaf name plus its argument spec.
+	// Only the spec is wanted here; the full path comes from CommandPath.
+	if _, spec, found := strings.Cut(cmd.Use, " "); found && strings.Contains(spec, "<") {
+		leaf.Args = spec
 	}
 
 	inherited := cmd.InheritedFlags()
@@ -180,6 +182,11 @@ func renderMarkdown(globals []flagInfo, leaves []leafInfo) string {
 		b.WriteString("\n\n")
 		if leaf.Short != "" {
 			b.WriteString(leaf.Short + "\n\n")
+		}
+		// Without this a command taking a positional looked like it took none,
+		// which is unrecoverable from the reference alone.
+		if leaf.Args != "" {
+			b.WriteString("Usage: `" + leaf.Path + " " + leaf.Args + "`\n\n")
 		}
 		if len(leaf.Requires) > 0 {
 			b.WriteString("Requires: " + joinFlags(leaf.Requires) + "\n\n")

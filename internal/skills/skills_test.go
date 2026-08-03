@@ -2,6 +2,7 @@ package skills
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -540,4 +541,202 @@ func asErr(err error, target **errx.Error) bool {
 		err = u.Unwrap()
 	}
 	return false
+}
+
+// The manifest is attacker-controlled input, not trusted state: a repository
+// can ship one, and a project-scoped install reads it. filepath.Join does not
+// reject "../" — it cleans it — so an entry naming an outside path was turned
+// into a real path and then deleted by the orphan sweep, unconfirmed, with
+// exit 0 and "ok": true.
+func TestManifestCannotNameAPathOutsideTheSkillDirectory(t *testing.T) {
+	escapes := []string{
+		"../../../victim.md",
+		"../sibling.md",
+		"a/../../../victim.md",
+		"/etc/passwd",
+	}
+	for _, rel := range escapes {
+		t.Run(rel, func(t *testing.T) {
+			dest := t.TempDir()
+			skillDir := filepath.Join(dest, SkillName)
+			if err := os.MkdirAll(skillDir, 0o755); err != nil {
+				t.Fatalf("mkdir: %v", err)
+			}
+			victim := filepath.Join(dest, "victim.md")
+			if err := os.WriteFile(victim, []byte("precious\n"), 0o644); err != nil {
+				t.Fatalf("seed: %v", err)
+			}
+			seedManifest(t, skillDir, rel, sum([]byte("precious\n")))
+
+			opts := Options{Provider: ProviderClaude, Scope: ScopeUser, Dest: dest, Confirmed: true}
+			_, err := install(t, opts)
+			if err == nil {
+				t.Fatal("an escaping manifest entry was accepted")
+			}
+			var typed *errx.Error
+			if !asErr(err, &typed) || typed.Reason != "MANIFEST_CORRUPT" {
+				t.Errorf("error = %v, want MANIFEST_CORRUPT", err)
+			}
+			if _, statErr := os.Stat(victim); statErr != nil {
+				t.Error("the outside file was deleted")
+			}
+
+			// Uninstall reads the same manifest and must refuse identically.
+			if _, err := Uninstall(context.Background(), opts); err == nil {
+				t.Error("uninstall accepted an escaping manifest entry")
+			}
+			if _, statErr := os.Stat(victim); statErr != nil {
+				t.Error("uninstall deleted the outside file")
+			}
+		})
+	}
+}
+
+// Guarding only the leaf was not enough: MkdirAll succeeds silently when an
+// intermediate directory is a link to an existing one, so the write landed
+// inside the link target. That is the shared-skills-tree case the refusal
+// exists for.
+func TestASymlinkedSubdirectoryIsRefused(t *testing.T) {
+	dest := t.TempDir()
+	shared := t.TempDir()
+	precious := filepath.Join(shared, "commands.md")
+	if err := os.WriteFile(precious, []byte("hand maintained\n"), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	skillDir := filepath.Join(dest, SkillName)
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.Symlink(shared, filepath.Join(skillDir, "reference")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	opts := Options{Provider: ProviderClaude, Scope: ScopeUser, Dest: dest, Confirmed: true}
+	if _, err := install(t, opts); err == nil {
+		t.Fatal("a symlinked subdirectory was written through")
+	}
+	got, err := os.ReadFile(precious)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if string(got) != "hand maintained\n" {
+		t.Error("the link target was overwritten")
+	}
+}
+
+// Install refuses to write through a link; removing through one would be the
+// same mistake with a worse outcome.
+func TestUninstallRefusesASymlinkedSkillDirectory(t *testing.T) {
+	dest := t.TempDir()
+	elsewhere := t.TempDir()
+	keep := filepath.Join(elsewhere, "keep.md")
+	if err := os.WriteFile(keep, []byte("keep\n"), 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := os.Symlink(elsewhere, filepath.Join(dest, SkillName)); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	opts := Options{Provider: ProviderClaude, Scope: ScopeUser, Dest: dest, Confirmed: true}
+	if _, err := Uninstall(context.Background(), opts); err == nil {
+		t.Fatal("uninstall followed a symlinked skill directory")
+	}
+	if _, err := os.Stat(keep); err != nil {
+		t.Error("uninstall removed something through the link")
+	}
+}
+
+// An install interrupted after the in-progress marker must still own its
+// files. Writing an empty file list as that marker disowned everything the
+// previous run installed, so the next run called them all foreign and refused
+// with exit 7 — the opposite of self-healing.
+func TestAnInterruptedInstallStillOwnsItsFiles(t *testing.T) {
+	opts := destOpts(t, ProviderClaude)
+	if _, err := install(t, opts); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	skillDir := filepath.Join(opts.Dest, SkillName)
+
+	// Simulate the interruption: the marker is on disk, the payload is not.
+	raw, err := os.ReadFile(filepath.Join(skillDir, manifestName))
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	var m manifest
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatalf("parse manifest: %v", err)
+	}
+	if !m.Complete {
+		t.Fatal("a finished install left the manifest incomplete")
+	}
+	if len(m.Files) == 0 {
+		t.Fatal("the manifest records no files, so nothing is owned")
+	}
+	m.Complete = false
+	torn, _ := json.MarshalIndent(m, "", "  ")
+	if err := os.WriteFile(filepath.Join(skillDir, manifestName), torn, 0o644); err != nil {
+		t.Fatalf("write torn manifest: %v", err)
+	}
+	if err := os.Remove(filepath.Join(skillDir, "SKILL.md")); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+
+	// Without --yes: the files are still ours, so this must not refuse.
+	res, err := install(t, Options{Provider: ProviderClaude, Scope: ScopeUser, Dest: opts.Dest})
+	if err != nil {
+		t.Fatalf("repairing a torn install failed: %v", err)
+	}
+	if !res.InSync {
+		t.Error("the repaired install is not in sync")
+	}
+	if _, err := os.Stat(filepath.Join(skillDir, "SKILL.md")); err != nil {
+		t.Errorf("the missing file was not restored: %v", err)
+	}
+}
+
+// A caller's own --dest is their mistake to fix, not a defect to report.
+func TestCursorRulesDestinationIsAUsageError(t *testing.T) {
+	dest := filepath.Join(t.TempDir(), ".cursor", "rules")
+	if err := os.MkdirAll(dest, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	_, err := install(t, Options{Provider: ProviderCursor, Scope: ScopeUser, Dest: dest})
+	if errx.ExitCode(err) != errx.CodeUsage {
+		t.Errorf("exit code = %d, want %d", errx.ExitCode(err), errx.CodeUsage)
+	}
+}
+
+// Uninstall must not claim in_sync when it deliberately left a file behind.
+func TestUninstallReportsWhatItLeft(t *testing.T) {
+	opts := destOpts(t, ProviderClaude)
+	if _, err := install(t, opts); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	edited := filepath.Join(opts.Dest, SkillName, "SKILL.md")
+	if err := os.WriteFile(edited, []byte("# mine\n"), 0o644); err != nil {
+		t.Fatalf("edit: %v", err)
+	}
+	res, err := Uninstall(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("uninstall: %v", err)
+	}
+	if res.InSync {
+		t.Error("uninstall reported in_sync while leaving an edited file behind")
+	}
+}
+
+// seedManifest writes a manifest naming one file, as a hostile repository would.
+func seedManifest(t *testing.T, skillDir, rel, hash string) {
+	t.Helper()
+	m := manifest{
+		Version: 1, Skill: SkillName, Provider: string(ProviderClaude), Complete: true,
+		Files: []manifestFile{{Path: rel, SHA256: hash}},
+	}
+	raw, err := json.MarshalIndent(m, "", "  ")
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, manifestName), raw, 0o644); err != nil {
+		t.Fatalf("seed manifest: %v", err)
+	}
 }

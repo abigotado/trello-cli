@@ -99,3 +99,23 @@ func TestRequirementsAreRendered(t *testing.T) {
 		t.Error("the at-least-one-of requirement is not documented")
 	}
 }
+
+// cmd.Use carries the leaf name plus its argument spec, so a nested command's
+// usage line has to be built from CommandPath rather than by prefixing the
+// root name — otherwise `auth default` renders as `trello-cli default`.
+func TestPositionalArgumentsRenderWithTheFullPath(t *testing.T) {
+	out := renderFromTree()
+	want := []string{
+		"Usage: `trello-cli search <query>`",
+		"Usage: `trello-cli auth default <account>`",
+	}
+	for _, line := range want {
+		if !strings.Contains(out, line) {
+			t.Errorf("the reference is missing %q", line)
+		}
+	}
+	// A command taking no positional must not claim one.
+	if strings.Contains(out, "Usage: `trello-cli boards list") {
+		t.Error("a command with no positional rendered a usage line")
+	}
+}

@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime/debug"
 	"strings"
 	"testing"
@@ -1180,47 +1181,6 @@ func TestChecklistAddItemHasNoUnusedFlags(t *testing.T) {
 // A requirement enforced in a command body with errx.Usage is invisible to the
 // tree walk that generates the command reference. This derives the list from
 // the tree so a new required flag cannot ship undocumented.
-func TestCommandsEnforcingRequiredFlagsAreAnnotated(t *testing.T) {
-	// Commands whose body rejects a missing flag, keyed by command path.
-	// Derived by reading the errx.Usage("--x is required") sites.
-	wantAnnotated := map[string][]string{
-		"trello-cli lists create":        {"name"},
-		"trello-cli cards create":        {"name"},
-		"trello-cli comments add":        {"text"},
-		"trello-cli checklists create":   {"name"},
-		"trello-cli checklists add-item": {"checklist-id", "name"},
-		"trello-cli checklists toggle":   {"item-id"},
-		"trello-cli attachments add":     {"url"},
-		"trello-cli auth login":          {"api-key", "token"},
-	}
-
-	app := NewApp()
-	root := app.NewRootCommand()
-	found := map[string]string{}
-	var walk func(*cobra.Command)
-	walk = func(c *cobra.Command) {
-		if v, ok := c.Annotations[annotationRequires]; ok {
-			found[c.CommandPath()] = v
-		}
-		for _, sub := range c.Commands() {
-			walk(sub)
-		}
-	}
-	walk(root)
-
-	for path, flags := range wantAnnotated {
-		got, ok := found[path]
-		if !ok {
-			t.Errorf("%s enforces required flags but carries no %q annotation, so the generated reference omits them",
-				path, annotationRequires)
-			continue
-		}
-		want := strings.Join(flags, " ")
-		if got != want {
-			t.Errorf("%s annotation = %q, want %q", path, got, want)
-		}
-	}
-}
 
 // skills install writes to the local filesystem only. TRELLO_CLI_READONLY
 // locks Trello, not this machine, so gating it there would make the lock mean
@@ -1354,4 +1314,98 @@ func TestVersionNeedsNoCredentials(t *testing.T) {
 	if got := h.run("version"); got != errx.CodeOK {
 		t.Errorf("exit code = %d, want 0\nstderr: %s", got, h.err())
 	}
+}
+
+// This replaced a hand-maintained map of "commands known to enforce a flag",
+// which is exactly how eleven commands came to enforce --card without
+// annotating it: the map was the thing nobody updated. Deriving the
+// requirement from the binary's own behaviour means a newly enforced flag
+// fails the build until it is annotated, and therefore documented.
+func TestEnforcedFlagsAreDerivedFromBehaviourNotAList(t *testing.T) {
+	// Board and list are deliberately excluded: both are satisfiable by an
+	// environment variable (TRELLO_CLI_BOARD, TRELLO_CLI_LIST), so they are
+	// conditional rather than required, and each command that needs one says
+	// so in the flag's own description. A card has no such escape, which is
+	// why --card belongs in the annotation everywhere it is enforced.
+	conditional := map[string]bool{"board": true, "list": true}
+	flagRef := regexp.MustCompile(`--([a-z][a-z-]*)`)
+
+	var leaves []*cobra.Command
+	var walk func(*cobra.Command)
+	walk = func(c *cobra.Command) {
+		if !c.HasSubCommands() && c.Runnable() {
+			leaves = append(leaves, c)
+		}
+		for _, sub := range c.Commands() {
+			walk(sub)
+		}
+	}
+	walk(NewApp().NewRootCommand())
+
+	for _, leaf := range leaves {
+		path := leaf.CommandPath()
+		t.Run(path, func(t *testing.T) {
+			h := newHarness(t, map[string]string{
+				"TRELLO_API_KEY":      "k",
+				"TRELLO_TOKEN":        "t",
+				"TRELLO_CLI_BASE_URL": "http://127.0.0.1:9",
+				"TRELLO_CLI_TIMEOUT":  "1s",
+			}, nil)
+			if h.run(strings.Fields(strings.TrimPrefix(path, "trello-cli "))...) != errx.CodeUsage {
+				return
+			}
+			var envelope struct {
+				Error struct{ Message string } `json:"error"`
+			}
+			if err := json.Unmarshal([]byte(h.out()), &envelope); err != nil {
+				t.Fatalf("decode envelope: %v", err)
+			}
+			if !strings.Contains(envelope.Error.Message, "is required") {
+				return
+			}
+
+			annotated := map[string]bool{}
+			for _, f := range strings.Fields(leaf.Annotations[annotationRequires]) {
+				annotated[f] = true
+			}
+			for _, f := range strings.Fields(leaf.Annotations[annotationRequiresOneOf]) {
+				annotated[f] = true
+			}
+			for _, m := range flagRef.FindAllStringSubmatch(envelope.Error.Message, -1) {
+				// --card and --card-id are one requirement; the reference
+				// documents the name form and says so in its legend. Only
+				// collapse when the name form is a real flag: --item-id and
+				// --checklist-id have no twin and are named in full.
+				name := m[1]
+				if base := strings.TrimSuffix(name, "-id"); leaf.Flags().Lookup(base) != nil {
+					name = base
+				}
+				if conditional[name] || annotated[name] {
+					continue
+				}
+				t.Errorf("enforces --%s (%q) but does not annotate it, so the generated reference omits it",
+					name, envelope.Error.Message)
+			}
+		})
+	}
+}
+
+// The other direction: an annotation naming a flag the command does not have
+// documents a requirement no caller can satisfy.
+func TestAnnotatedFlagsExist(t *testing.T) {
+	var walk func(*cobra.Command)
+	walk = func(c *cobra.Command) {
+		for _, key := range []string{annotationRequires, annotationRequiresOneOf} {
+			for _, name := range strings.Fields(c.Annotations[key]) {
+				if c.Flags().Lookup(name) == nil && c.Flags().Lookup(name+"-id") == nil {
+					t.Errorf("%s annotates %q but has no --%s or --%s-id flag",
+						c.CommandPath(), name, name, name)
+				}
+			}
+		}
+		for _, sub := range c.Commands() {
+			walk(sub)
+		}
+	}
+	walk(NewApp().NewRootCommand())
 }

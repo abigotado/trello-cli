@@ -1,5 +1,7 @@
-# Release pipeline. Run `goreleaser release --snapshot --clean` before tagging;
-# that exercises every stage except publishing.
+# Release pipeline. Rehearse with `goreleaser release --skip=publish --clean` on
+# a clean tagged tree: --snapshot skips the changelog pipe entirely, so it does
+# not exercise the notes the real release will carry. release.footer is still
+# rendered only at publish time.
 #
 # There are deliberately no -X ldflags. Go stamps the version, revision, and
 # commit time into the binary from VCS with no build flags at all, and that
@@ -56,16 +58,24 @@ snapshot:
   version_template: "{{ incpatch .Version }}-next"
 
 changelog:
-  # git, not github: no API call, so the notes a local --snapshot rehearsal
-  # produces are the notes the real release will produce.
+  # git, not github: no API call, so a local rehearsal produces the same notes
+  # the real release will.
+  #
+  # No sort key. Unset, goreleaser keeps git-log order, which is newest first.
+  # "asc" sorts alphabetically by commit subject rather than chronologically,
+  # which reads as if the history were shuffled.
   use: git
-  sort: asc
 
 release:
   # Draft while the pipeline is young: the artifact list gets inspected before
   # it is public. Flip to false once it has proven itself.
   draft: true
   prerelease: auto
+  # A tag is immutable, so a job that dies mid-upload must be re-runnable.
+  # Without these, the retry fails on artifacts the first attempt already
+  # uploaded and the release stays half-populated behind a tag that cannot move.
+  replace_existing_artifacts: true
+  replace_existing_draft: true
   footer: |
     ---
     Verify a download:

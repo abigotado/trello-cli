@@ -32,7 +32,7 @@ Available on every command.
 
 Attach a URL to a card
 
-Requires: `--url`
+Requires: `--card`, `--url`
 
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |
@@ -45,6 +45,8 @@ Requires: `--url`
 
 List the attachments on a card
 
+Requires: `--card`
+
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |
 | `--board` | string |  | board to resolve the card name within |
@@ -53,6 +55,8 @@ List the attachments on a card
 ### `trello-cli auth default`  **W**
 
 Set the account used when none is named
+
+Usage: `trello-cli auth default <account>`
 
 No flags of its own.
 
@@ -113,6 +117,8 @@ No flags of its own.
 
 Archive a card, or restore it with --restore
 
+Requires: `--card`
+
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |
 | `--board` | string |  | board to resolve the card name within |
@@ -138,6 +144,8 @@ Requires: `--name`
 
 Permanently delete a card
 
+Requires: `--card`
+
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |
 | `--board` | string |  | board to resolve the card name within |
@@ -146,6 +154,8 @@ Permanently delete a card
 ### `trello-cli cards get`
 
 Show one card
+
+Requires: `--card`
 
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |
@@ -166,6 +176,8 @@ List cards on a board, or in one list
 
 Move a card to another list
 
+Requires: `--card`
+
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |
 | `--board` | string |  | board name, id, or shortLink |
@@ -176,6 +188,8 @@ Move a card to another list
 ### `trello-cli cards update`  **W**
 
 Change a card's fields
+
+Requires: `--card`
 
 Requires at least one of: `--name`, `--desc`, `--due`, `--clear-due`, `--due-complete`
 
@@ -204,7 +218,7 @@ Requires: `--checklist-id`, `--name`
 
 Add a checklist to a card
 
-Requires: `--name`
+Requires: `--card`, `--name`
 
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |
@@ -216,6 +230,8 @@ Requires: `--name`
 
 List the checklists on a card
 
+Requires: `--card`
+
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |
 | `--board` | string |  | board to resolve the card name within |
@@ -225,7 +241,7 @@ List the checklists on a card
 
 Mark a checklist item complete or incomplete
 
-Requires: `--item-id`
+Requires: `--card`, `--item-id`
 
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |
@@ -238,7 +254,7 @@ Requires: `--item-id`
 
 Add a comment to a card
 
-Requires: `--text`
+Requires: `--card`, `--text`
 
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |
@@ -249,6 +265,8 @@ Requires: `--text`
 ### `trello-cli comments list`
 
 List the comments on a card
+
+Requires: `--card`
 
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |
@@ -267,9 +285,11 @@ No flags of its own.
 
 Attach a label to a card
 
+Requires: `--card`, `--label`
+
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |
-| `--board` | string |  | board name, id, or shortLink |
+| `--board` | string |  | board holding the label; required unless --label-id is given |
 | `--card` | string |  | card name, id, or shortLink |
 | `--label` | string |  | label name or color |
 
@@ -285,9 +305,11 @@ List the labels defined on a board
 
 Detach a label from a card
 
+Requires: `--card`, `--label`
+
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |
-| `--board` | string |  | board name, id, or shortLink |
+| `--board` | string |  | board holding the label; required unless --label-id is given |
 | `--card` | string |  | card name, id, or shortLink |
 | `--label` | string |  | label name or color |
 
@@ -332,9 +354,11 @@ No flags of its own.
 
 Assign a member to a card
 
+Requires: `--card`, `--member`
+
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |
-| `--board` | string |  | board name, id, or shortLink |
+| `--board` | string |  | board holding the member; required unless --member-id is given |
 | `--card` | string |  | card name, id, or shortLink |
 | `--member` | string |  | member username or id |
 
@@ -350,15 +374,19 @@ List the members of a board
 
 Remove a member from a card
 
+Requires: `--card`, `--member`
+
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |
-| `--board` | string |  | board name, id, or shortLink |
+| `--board` | string |  | board holding the member; required unless --member-id is given |
 | `--card` | string |  | card name, id, or shortLink |
 | `--member` | string |  | member username or id |
 
 ### `trello-cli search`
 
 Search your boards and cards
+
+Usage: `trello-cli search <query>`
 
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |

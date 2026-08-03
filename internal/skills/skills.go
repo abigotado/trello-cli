@@ -12,6 +12,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -19,6 +20,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 
 	"github.com/abigotado/trello-cli/assets"
 	"github.com/abigotado/trello-cli/internal/errx"
@@ -162,6 +164,49 @@ type manifest struct {
 type manifestFile struct {
 	Path   string `json:"path"`
 	SHA256 string `json:"sha256"`
+}
+
+// safeJoin turns a manifest-relative path into an absolute one, refusing
+// anything that would escape the skill directory.
+//
+// The manifest is attacker-controlled input, not trusted state: a repository
+// can ship one, and a project-scoped install reads it. filepath.Join does not
+// reject "../" — it cleans it, which laundered a traversal into a real path
+// that the orphan sweep then deleted, with no confirmation and exit 0.
+func safeJoin(skillDir, rel string) (string, error) {
+	slashed := filepath.ToSlash(rel)
+
+	// Reject rather than sanitise. Rooting the path and cleaning it — the
+	// path.Clean("/"+rel) trick — cannot escape, but it silently rewrites
+	// "../../../victim.md" into "victim.md", so a hostile entry would still
+	// select a real file inside the skill directory and the condition would
+	// never be visible. An entry naming an outside path did not come from this
+	// tool, and the honest response is to say so.
+	if slashed == "" || slashed == "." || path.IsAbs(slashed) || filepath.IsAbs(rel) {
+		return "", corruptManifest(rel)
+	}
+	for _, part := range strings.Split(slashed, "/") {
+		if part == ".." {
+			return "", corruptManifest(rel)
+		}
+	}
+
+	target := filepath.Join(skillDir, filepath.FromSlash(slashed))
+	// Prove containment against the result too, rather than trusting the scan.
+	inside, err := filepath.Rel(skillDir, target)
+	if err != nil || inside == ".." || strings.HasPrefix(inside, ".."+string(filepath.Separator)) {
+		return "", corruptManifest(rel)
+	}
+	return target, nil
+}
+
+func corruptManifest(rel string) error {
+	return &errx.Error{
+		Code:    errx.CodeUsage,
+		Reason:  "MANIFEST_CORRUPT",
+		Message: fmt.Sprintf("the install manifest records a path outside the skill directory: %q", rel),
+		Hint:    "delete the skill directory and install again; a manifest naming an outside path did not come from this tool",
+	}
 }
 
 func (m manifest) hashes() map[string]string {
@@ -345,7 +390,14 @@ func Install(ctx context.Context, opts Options) (Result, error) {
 	// enforces an exact flat inventory there and unlinks what it does not
 	// expect, so an install would delete itself on the next sync.
 	if containsComponent(skillDir, filepath.Join(".cursor", "rules")) {
-		return Result{}, errx.Internal("refusing to install into a .cursor/rules path: %s", skillDir)
+		return Result{}, &errx.Error{
+			Code:   errx.CodeUsage,
+			Reason: "CURSOR_RULES_DIRECTORY",
+			Message: fmt.Sprintf(
+				"%s is under .cursor/rules, where an exact file inventory is enforced and anything unexpected is deleted",
+				skillDir),
+			Hint: "install into a skills directory instead, or omit --dest to use the provider's own location",
+		}
 	}
 
 	want, err := payload(opts.Provider)
@@ -401,7 +453,7 @@ func Install(ctx context.Context, opts Options) (Result, error) {
 		return nil
 	})
 	if lockErr != nil {
-		return Result{}, errx.Internal("lock the skill directory: %v", lockErr)
+		return Result{}, translateFS("lock", skillDir, lockErr)
 	}
 	if applyErr != nil {
 		return Result{}, applyErr
@@ -418,7 +470,12 @@ func classify(skillDir string, want map[string][]byte) ([]FileResult, error) {
 
 	for rel, data := range want {
 		seen[rel] = true
-		target := filepath.Join(skillDir, filepath.FromSlash(rel))
+		// The payload's own names are ours, but routing them through the same
+		// check keeps one path-construction rule in the package.
+		target, err := safeJoin(skillDir, rel)
+		if err != nil {
+			return nil, err
+		}
 		status, err := classifyOne(target, recorded[rel], sum(data), recorded != nil && hasKey(recorded, rel))
 		if err != nil {
 			return nil, err
@@ -431,7 +488,10 @@ func classify(skillDir string, want map[string][]byte) ([]FileResult, error) {
 		if seen[rel] {
 			continue
 		}
-		target := filepath.Join(skillDir, filepath.FromSlash(rel))
+		target, err := safeJoin(skillDir, rel)
+		if err != nil {
+			return nil, err
+		}
 		onDisk, err := os.ReadFile(target)
 		if err != nil {
 			continue // already gone
@@ -509,9 +569,19 @@ func refuseUnmanaged(files []FileResult, confirmed bool) error {
 // because the directory exists, so a torn install self-heals on the next run.
 // Per-file temp-and-rename prevents a torn file; nothing prevents a torn set.
 func apply(ctx context.Context, skillDir string, want map[string][]byte, files []FileResult, provider Provider) error {
-	// Mark the manifest incomplete first, so an interrupted run is visible.
+	// Record what this run intends to own BEFORE writing any of it, with the
+	// completeness flag still false. Writing an empty list as the in-progress
+	// marker disowned every file the previous run had installed, so an
+	// interrupted install left the next one classifying all of them foreign
+	// and refusing with exit 7 — the opposite of self-healing.
+	record := make([]manifestFile, 0, len(want))
+	for rel, data := range want {
+		record = append(record, manifestFile{Path: rel, SHA256: sum(data)})
+	}
+	sort.Slice(record, func(i, j int) bool { return record[i].Path < record[j].Path })
+
 	if err := writeManifest(skillDir, manifest{
-		Version: 1, Skill: SkillName, Provider: string(provider), Complete: false,
+		Version: 1, Skill: SkillName, Provider: string(provider), Complete: false, Files: record,
 	}); err != nil {
 		return err
 	}
@@ -545,29 +615,32 @@ func apply(ctx context.Context, skillDir string, want map[string][]byte, files [
 		if !shipped {
 			continue
 		}
-		if err := writeFile(f.Path, data); err != nil {
+		if err := writeFile(skillDir, f.Path, data); err != nil {
 			return err
 		}
 		f.Applied = true
 	}
 
-	// Record only what is actually shipped now.
-	record := make([]manifestFile, 0, len(want))
-	for rel, data := range want {
-		record = append(record, manifestFile{Path: rel, SHA256: sum(data)})
-	}
-	sort.Slice(record, func(i, j int) bool { return record[i].Path < record[j].Path })
 	return writeManifest(skillDir, manifest{
 		Version: 1, Skill: SkillName, Provider: string(provider), Complete: true, Files: record,
 	})
 }
 
 // writeFile writes one payload file atomically, refusing to follow a symlink.
-func writeFile(target string, data []byte) error {
+//
+// base is the directory the target must stay within; every component between
+// the two is checked. Guarding only the leaf was not enough: MkdirAll succeeds
+// silently when an intermediate directory is a link to an existing one, so
+// CreateTemp and Rename landed inside the link target. That is exactly the
+// shared-skills-tree case the refusal exists for.
+func writeFile(base, target string, data []byte) error {
+	if err := assertNoSymlink(base, target); err != nil {
+		return err
+	}
 	if info, err := os.Lstat(target); err == nil && info.Mode()&os.ModeSymlink != 0 {
-		// Checked immediately before the write, not only during planning:
-		// os.WriteFile follows a symlinked file and overwrites whatever it
-		// points at, and os.Rename replaces the link and orphans the target.
+		// Re-checked immediately before the write: os.WriteFile follows a
+		// symlinked file and overwrites whatever it points at, and os.Rename
+		// replaces the link and orphans the target.
 		return symlinkError(target)
 	}
 	dir := filepath.Dir(target)
@@ -616,7 +689,7 @@ func writeManifest(skillDir string, m manifest) error {
 	if err != nil {
 		return errx.Internal("encode the install manifest: %v", err)
 	}
-	return writeFile(filepath.Join(skillDir, manifestName), raw)
+	return writeFile(skillDir, filepath.Join(skillDir, manifestName), raw)
 }
 
 // Uninstall removes only the files this tool installed and still owns.
@@ -626,6 +699,11 @@ func Uninstall(ctx context.Context, opts Options) (Result, error) {
 		return Result{}, err
 	}
 	skillDir := filepath.Join(root, SkillName)
+	// Install refuses to write through a link; removing through one would be
+	// the same mistake with a worse outcome.
+	if err := assertNoSymlink(root, skillDir); err != nil {
+		return Result{}, err
+	}
 	res := Result{
 		Provider: string(opts.Provider),
 		Scope:    string(opts.Scope),
@@ -637,7 +715,10 @@ func Uninstall(ctx context.Context, opts Options) (Result, error) {
 	recorded := readManifest(skillDir).hashes()
 	var files []FileResult
 	for rel, hash := range recorded {
-		target := filepath.Join(skillDir, filepath.FromSlash(rel))
+		target, joinErr := safeJoin(skillDir, rel)
+		if joinErr != nil {
+			return Result{}, joinErr
+		}
 		onDisk, readErr := os.ReadFile(target)
 		if readErr != nil {
 			files = append(files, FileResult{Path: target, Status: StatusAbsent})
@@ -666,7 +747,14 @@ func Uninstall(ctx context.Context, opts Options) (Result, error) {
 		_ = os.Remove(skillDir)
 	}
 	res.Files = files
+	// Only true when nothing recorded is still on disk. Files left behind
+	// because the user edited them are exactly the case a caller needs to see.
 	res.InSync = true
+	for _, f := range files {
+		if f.Status != StatusAbsent && !f.Applied {
+			res.InSync = false
+		}
+	}
 	return res, nil
 }
 
@@ -689,18 +777,21 @@ func inSync(files []FileResult, applied bool) bool {
 	return true
 }
 
-// assertNoSymlink refuses a symlink anywhere from root down to skillDir.
+// assertNoSymlink refuses a symlink anywhere from base down to target.
 //
-// ~/.claude/skills already contains symlinks into a shared skills tree on a
-// real machine, so a linked entry here would write into someone else's
-// canonical source. Not overridable by --yes: we cannot know whether the
-// link's target is precious.
-func assertNoSymlink(root, skillDir string) error {
-	rel, err := filepath.Rel(root, skillDir)
+// The user-level skills directory already contains symlinks into a shared
+// tree on a real machine, so a linked component here would write into someone
+// else's canonical source. Not overridable by --yes: we cannot know whether
+// the link's target is precious.
+//
+// Every component is checked, not only the last. A link in the middle is the
+// one that escapes silently, because MkdirAll through it succeeds.
+func assertNoSymlink(base, target string) error {
+	rel, err := filepath.Rel(base, target)
 	if err != nil {
-		return errx.Internal("resolve %s: %v", skillDir, err)
+		return errx.Internal("resolve %s: %v", target, err)
 	}
-	current := root
+	current := base
 	if info, err := os.Lstat(current); err == nil && info.Mode()&os.ModeSymlink != 0 {
 		return symlinkError(current)
 	}
@@ -734,6 +825,19 @@ func containsComponent(p, component string) bool {
 // level as CodeInternal with the hint "this is a bug in trello-cli; do not
 // retry" — telling the caller to file a bug when the fix is one chmod.
 func translateFS(op, p string, err error) error {
+	// Conditions the caller can act on. Left untyped they surface as
+	// CodeInternal with "this is a bug in trello-cli; do not retry", which
+	// tells someone to file a bug when the fix is a chmod or freeing a disk.
+	for _, e := range []error{syscall.EROFS, syscall.ENOSPC, syscall.ENOTDIR, syscall.EISDIR} {
+		if errors.Is(err, e) {
+			return &errx.Error{
+				Code:    errx.CodeUsage,
+				Reason:  "WRITE_DENIED",
+				Message: fmt.Sprintf("cannot %s %s: %v", op, p, err),
+				Hint:    "check the destination is a writable directory with space available",
+			}
+		}
+	}
 	if os.IsPermission(err) {
 		return &errx.Error{
 			Code:    errx.CodeUsage,

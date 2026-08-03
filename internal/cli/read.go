@@ -190,7 +190,7 @@ func (a *App) newCardsCommand() *cobra.Command {
 	getBoardRef.bind(get, "board", "board to resolve the card name within")
 	cardRef.bind(get, "card", "card name, id, or shortLink")
 
-	getCmd := a.newCommand(get, func(ctx context.Context, _ *cobra.Command, _ []string) error {
+	getCmd := a.newCommand(requires(get, "card"), func(ctx context.Context, _ *cobra.Command, _ []string) error {
 		client, err := a.trelloClient(ctx)
 		if err != nil {
 			return err
@@ -291,7 +291,7 @@ func (a *App) newCommentsCommand() *cobra.Command {
 	cmd.Flags().IntVar(&limit, "limit", 0, "maximum comments to return (server default when unset)")
 	cmd.Flags().StringVar(&before, "before", "", "return only comments older than this comment id or ISO date")
 
-	sub := a.newCommand(cmd, func(ctx context.Context, _ *cobra.Command, _ []string) error {
+	sub := a.newCommand(requires(cmd, "card"), func(ctx context.Context, _ *cobra.Command, _ []string) error {
 		client, err := a.trelloClient(ctx)
 		if err != nil {
 			return err
@@ -322,7 +322,7 @@ func (a *App) newChecklistsCommand() *cobra.Command {
 	boardRef.bind(cmd, "board", "board to resolve the card name within")
 	cardRef.bind(cmd, "card", "card name, id, or shortLink")
 
-	sub := a.newCommand(cmd, func(ctx context.Context, _ *cobra.Command, _ []string) error {
+	sub := a.newCommand(requires(cmd, "card"), func(ctx context.Context, _ *cobra.Command, _ []string) error {
 		client, err := a.trelloClient(ctx)
 		if err != nil {
 			return err
@@ -350,7 +350,7 @@ func (a *App) newAttachmentsCommand() *cobra.Command {
 	boardRef.bind(cmd, "board", "board to resolve the card name within")
 	cardRef.bind(cmd, "card", "card name, id, or shortLink")
 
-	sub := a.newCommand(cmd, func(ctx context.Context, _ *cobra.Command, _ []string) error {
+	sub := a.newCommand(requires(cmd, "card"), func(ctx context.Context, _ *cobra.Command, _ []string) error {
 		client, err := a.trelloClient(ctx)
 		if err != nil {
 			return err
