@@ -27,10 +27,16 @@ wins and `internal/errx` is the thing that gets fixed.
   names, types, and nullability.
 - Adding a field is additive. Renaming, removing, or changing the type of one
   requires bumping `v`.
-- **`v` is frozen at the first tagged release.** Until then it stays `1` and
-  describes the shape as of the current commit — nothing has been published, so
-  there is no compatibility to keep. From the first tag onward every change
-  above is breaking and bumps `v`.
+- **`v` describes the shape of the envelope, and it must be true of the binary
+  that printed it.** What froze at `v0.1.0` is the shape, not the counter: from
+  that tag on the shape is published, so any change to it bumps `v` in the same
+  commit. A `0.x` series buys freedom in the flags and the command surface,
+  never in the truthfulness of `v`.
+- `v` and the binary's version are independent counters, coupled in one
+  direction only. A `v` bump is a breaking change to published output, so it
+  takes the largest bump the series allows — minor while `0.x`, major from
+  `1.0.0`. The reverse does not hold: renaming a flag breaks the command
+  contract and leaves `v` untouched.
 - The envelope key set is pinned by `TestEnvelopeKeySetIsPinned` in
   `internal/output`. It fails on any rename, removal, or addition, so an
   envelope change cannot happen by accident: editing that list is the moment to

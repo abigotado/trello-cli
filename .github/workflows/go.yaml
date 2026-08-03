@@ -47,6 +47,14 @@ jobs:
       - name: go test
         run: go test -race ./...
 
+      # goreleaser check needs no tag, so a broken release config is caught on
+      # every pull request instead of at release time, when the tag is already
+      # public and immutable.
+      - name: goreleaser check
+        run: |
+          go install github.com/goreleaser/goreleaser/v2@v2.17.1
+          goreleaser check
+
       # The generated contract is what agents read. If regenerating changes it,
       # the committed copy no longer matches internal/errx.
       - name: Generated contract is current

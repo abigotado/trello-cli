@@ -167,6 +167,7 @@ func (a *App) NewRootCommand() *cobra.Command {
 
 	root.AddCommand(
 		a.newContractCommand(),
+		a.newVersionCommand(),
 		a.newMeCommand(),
 		a.newAuthCommand(),
 		a.newSkillsCommand(),

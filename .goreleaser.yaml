@@ -1,0 +1,78 @@
+# Release pipeline. Run `goreleaser release --snapshot --clean` before tagging;
+# that exercises every stage except publishing.
+#
+# There are deliberately no -X ldflags. Go stamps the version, revision, and
+# commit time into the binary from VCS with no build flags at all, and that
+# stamping survives -trimpath and -s -w. An -X value would only ever reach a
+# binary goreleaser itself built, so every `go install` user — the install path
+# the README leads with — would get a hardcoded placeholder forever.
+version: 2
+
+project_name: trello-cli
+
+before:
+  hooks:
+    # download, not tidy: tidy rewrites go.mod and go.sum mid-release, dirtying
+    # the very tree goreleaser refuses to build dirty.
+    - go mod download
+
+builds:
+  - id: trello-cli
+    main: ./cmd/trello-cli
+    binary: trello-cli
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    # Listed explicitly to suppress goreleaser's default -X main.version flags,
+    # which this binary has no variables to receive.
+    ldflags:
+      - -s -w
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    goos: [darwin, linux, windows]
+    goarch: [amd64, arm64]
+
+archives:
+  - id: trello-cli
+    ids: [trello-cli]
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    # LICENSE and README.md are literal on purpose. A literal path that does
+    # not exist fails the release; a glob only logs a warning nobody reads.
+    # Shipping without a license should not be survivable.
+    files:
+      - LICENSE
+      - README.md
+      - docs/*
+
+checksum:
+  name_template: "{{ .ProjectName }}_{{ .Version }}_checksums.txt"
+  algorithm: sha256
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  # git, not github: no API call, so the notes a local --snapshot rehearsal
+  # produces are the notes the real release will produce.
+  use: git
+  sort: asc
+
+release:
+  # Draft while the pipeline is young: the artifact list gets inspected before
+  # it is public. Flip to false once it has proven itself.
+  draft: true
+  prerelease: auto
+  footer: |
+    ---
+    Verify a download:
+
+    ```
+    shasum -a 256 -c trello-cli_{{ .Version }}_checksums.txt --ignore-missing
+    ```
+
+    Run `trello-cli contract` for the envelope version and exit-code table this
+    build obeys, and `trello-cli version` for the build itself.

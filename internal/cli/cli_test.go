@@ -7,11 +7,13 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"testing"
 
 	"github.com/abigotado/trello-cli/internal/auth"
 	"github.com/abigotado/trello-cli/internal/errx"
+	"github.com/abigotado/trello-cli/internal/skills"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )
@@ -1226,7 +1228,7 @@ func TestCommandsEnforcingRequiredFlagsAreAnnotated(t *testing.T) {
 func TestSkillsInstallIsNotGatedByReadOnly(t *testing.T) {
 	dest := t.TempDir()
 	h := newHarness(t, map[string]string{"TRELLO_CLI_READONLY": "1"}, nil)
-	if got := h.run("skills", "install", "--provider", "claude", "--dest", dest); got != errx.CodeOK {
+	if got := h.run("skills", "install", "--provider", string(skills.ProviderClaude), "--dest", dest); got != errx.CodeOK {
 		t.Fatalf("exit code = %d, want 0\nstdout: %s\nstderr: %s", got, h.out(), h.err())
 	}
 	if _, err := os.Stat(filepath.Join(dest, "trello", "SKILL.md")); err != nil {
@@ -1246,7 +1248,7 @@ func TestSkillsInstallRefusesDestWithEveryProvider(t *testing.T) {
 func TestSkillsInstallDryRunWritesNothing(t *testing.T) {
 	dest := t.TempDir()
 	h := newHarness(t, nil, nil)
-	if got := h.run("--dry-run", "skills", "install", "--provider", "claude", "--dest", dest); got != errx.CodeOK {
+	if got := h.run("--dry-run", "skills", "install", "--provider", string(skills.ProviderClaude), "--dest", dest); got != errx.CodeOK {
 		t.Fatalf("exit code = %d, want 0\nstderr: %s", got, h.err())
 	}
 	entries, err := os.ReadDir(dest)
@@ -1255,5 +1257,101 @@ func TestSkillsInstallDryRunWritesNothing(t *testing.T) {
 	}
 	if len(entries) != 0 {
 		t.Errorf("--dry-run created %d entries", len(entries))
+	}
+}
+
+// The version is read from Go's build stamping, not injected at link time, so
+// the parsing is what can silently go wrong. read is injected rather than
+// relying on how the test binary itself happened to be built.
+func TestBuildVersionReadsTheStamp(t *testing.T) {
+	tests := []struct {
+		name       string
+		info       *debug.BuildInfo
+		ok         bool
+		wantVer    string
+		wantCommit string
+	}{
+		{
+			name: "a tagged build reports its tag",
+			info: &debug.BuildInfo{
+				GoVersion: "go1.24.1",
+				Main:      debug.Module{Version: "v0.1.0"},
+				Settings: []debug.BuildSetting{
+					{Key: "vcs.revision", Value: "abc123"},
+					{Key: "vcs.time", Value: "2026-08-03T00:00:00Z"},
+				},
+			},
+			ok: true, wantVer: "v0.1.0", wantCommit: "abc123",
+		},
+		{
+			// go install from the module proxy has no VCS information at all.
+			name:    "a proxy build has a version but no commit",
+			info:    &debug.BuildInfo{GoVersion: "go1.24.1", Main: debug.Module{Version: "v0.1.0"}},
+			ok:      true,
+			wantVer: "v0.1.0",
+		},
+		{
+			// "(devel)" is a toolchain spelling with parentheses in it; the
+			// contract reports a plain token.
+			name:    "devel is normalised",
+			info:    &debug.BuildInfo{GoVersion: "go1.24.1", Main: debug.Module{Version: "(devel)"}},
+			ok:      true,
+			wantVer: "devel",
+		},
+		{
+			name:    "no build info at all",
+			ok:      false,
+			wantVer: "devel",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := buildVersion(func() (*debug.BuildInfo, bool) { return tt.info, tt.ok })
+			if got.Version != tt.wantVer {
+				t.Errorf("version = %q, want %q", got.Version, tt.wantVer)
+			}
+			if got.Commit != tt.wantCommit {
+				t.Errorf("commit = %q, want %q", got.Commit, tt.wantCommit)
+			}
+			if got.Go == "" || got.OS == "" || got.Arch == "" {
+				t.Errorf("toolchain fields are incomplete: %+v", got)
+			}
+		})
+	}
+}
+
+// Setting cobra.Command.Version would register a --version flag whose output
+// is printed before PersistentPreRunE runs, so no output.Writer exists yet and
+// a bare, envelope-less line lands on stdout with exit 0 — silent corruption
+// for every parser. With no flag registered it falls through to the usage path.
+func TestVersionIsASubcommandNotAFlag(t *testing.T) {
+	h := newHarness(t, nil, nil)
+	if got := h.run("--version"); got != errx.CodeUsage {
+		t.Errorf("--version exit code = %d, want %d", got, errx.CodeUsage)
+	}
+
+	h2 := newHarness(t, nil, nil)
+	if got := h2.run("version"); got != errx.CodeOK {
+		t.Fatalf("version exit code = %d, want 0\nstderr: %s", got, h2.err())
+	}
+	var env struct {
+		Data map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(h2.out()), &env); err != nil {
+		t.Fatalf("version did not print an envelope: %v\n%s", err, h2.out())
+	}
+	for _, key := range []string{"version", "commit", "commitTime", "go", "os", "arch"} {
+		if _, ok := env.Data[key]; !ok {
+			t.Errorf("version output is missing %q: %v", key, env.Data)
+		}
+	}
+}
+
+// version must work with no credentials and no home directory: it is the first
+// thing anyone runs in a bug report.
+func TestVersionNeedsNoCredentials(t *testing.T) {
+	h := newHarness(t, map[string]string{}, nil)
+	if got := h.run("version"); got != errx.CodeOK {
+		t.Errorf("exit code = %d, want 0\nstderr: %s", got, h.err())
 	}
 }

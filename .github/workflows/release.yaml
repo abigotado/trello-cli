@@ -1,0 +1,71 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+# The repository default for GITHUB_TOKEN is read-only, so the release job must
+# opt in. contents: write is the whole requirement — it covers creating the
+# release and uploading assets. Declaring permissions resets every other scope
+# to none, which is what we want: no packages, no id-token, no discussions.
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Git Checkout
+        # fetch-depth: 0 is mandatory. The default shallow fetch leaves
+        # goreleaser with no tags and no history to build release notes from.
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # A tag is immutable once the module proxy has seen it, so this is the
+      # last honest gate. Deliberately does not run `go generate`: that would
+      # dirty the tree, and goreleaser refuses to build a dirty tree.
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        run: go test -race ./...
+
+      # The version this binary reports comes from VCS stamping rather than
+      # ldflags, so it can fail silently if stamping is ever disabled. Assert it
+      # before anything is published.
+      - name: Assert the binary reports the tag
+        run: |
+          set -euo pipefail
+          go build -o "${RUNNER_TEMP}/trello-cli" ./cmd/trello-cli
+          got=$("${RUNNER_TEMP}/trello-cli" version -o json | jq -r '.data.version')
+          if [ "$got" != "${GITHUB_REF_NAME}" ]; then
+            echo "::error::binary reports version '$got', expected '${GITHUB_REF_NAME}'"
+            exit 1
+          fi
+          echo "version stamp ok: $got"
+
+      # Installed rather than used as a third-party action: this repository's
+      # allowed-actions policy is not readable from here, and a restrictive one
+      # would fail at "Prepare all required actions" with an error that reads
+      # like a network fault. This also pins the exact goreleaser build.
+      - name: Install goreleaser
+        run: go install github.com/goreleaser/goreleaser/v2@v2.17.1
+
+      - name: goreleaser check
+        run: goreleaser check
+
+      - name: goreleaser release
+        run: goreleaser release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

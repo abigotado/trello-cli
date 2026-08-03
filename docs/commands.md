@@ -384,3 +384,9 @@ Remove the trello skill files this tool installed
 | `--provider` | string |  | claude, codex, cursor, or all |
 | `--scope` | string | `user` | user or project |
 
+### `trello-cli version`
+
+Print the build this binary was produced from
+
+No flags of its own.
+
