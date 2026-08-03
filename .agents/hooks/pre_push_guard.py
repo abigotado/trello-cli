@@ -229,7 +229,30 @@ def _effective_hooks_directory(
     return path / "hooks"
 
 
-def _runs_quality_gate(hook: Path, repository_root: Path) -> bool:
+def _main_worktree_root(working_directory: str) -> Optional[Path]:
+    """Locate the top level of the main worktree.
+
+    `.githooks/install` records an absolute `core.hooksPath`, so every linked
+    worktree inherits a path into the *main* checkout's `.githooks`. That is
+    the same tracked gate, and it runs in full — the hook resolves the pushed
+    tree with `git rev-parse --show-toplevel`, not from its own location.
+    """
+    common_directory = _git_output(working_directory, ["rev-parse", "--git-common-dir"])
+    if common_directory is None:
+        return None
+    path = Path(common_directory)
+    # Git reports this relative to the directory it was run in, which `-C`
+    # pinned to working_directory.
+    if not path.is_absolute():
+        path = Path(working_directory) / path
+    return path.parent
+
+
+def _runs_quality_gate(
+    hook: Path,
+    repository_root: Path,
+    working_directory: str,
+) -> bool:
     """Report whether this pre-push hook actually runs the trello-cli gate.
 
     The question is whether the gate executes, not whether `core.hooksPath`
@@ -237,18 +260,28 @@ def _runs_quality_gate(hook: Path, repository_root: Path) -> bool:
     and chains `.githooks/pre-push` from it runs the gate in full, and must not
     be forced to repoint `core.hooksPath` — that would silently stop every
     other hook in their directory, since Git does not fall back to it.
+
+    Both the pushed worktree's `.githooks` and the main worktree's count. From
+    a linked worktree those are two identical copies at different paths, and
+    accepting only the first denies every push from a worktree.
     """
     if not hook.is_file() or not os.access(hook, os.X_OK):
         return False
 
-    gate = repository_root / ".githooks" / "pre-push"
+    roots = [repository_root]
+    main_root = _main_worktree_root(working_directory)
+    if main_root is not None:
+        roots.append(main_root)
+    gates = [root / ".githooks" / "pre-push" for root in roots]
+
     try:
-        if hook.resolve() == gate.resolve():
+        resolved = hook.resolve()
+        if any(resolved == gate.resolve() for gate in gates):
             return True
     except OSError:
         return False
 
-    if not gate.is_file():
+    if not any(gate.is_file() for gate in gates):
         return False
     try:
         return _GATE_REFERENCE in hook.read_text(errors="ignore")
@@ -334,7 +367,7 @@ def main() -> int:
     configured = _git_output(working_directory, ["config", "--get", "core.hooksPath"])
     hooks_directory = _effective_hooks_directory(working_directory, root, configured)
     if hooks_directory is None or not _runs_quality_gate(
-        hooks_directory / "pre-push", root
+        hooks_directory / "pre-push", root, working_directory
     ):
         _deny(_not_installed_reason(configured))
 
