@@ -15,6 +15,7 @@ import (
 
 	"github.com/abigotado/trello-cli/internal/auth"
 	"github.com/abigotado/trello-cli/internal/errx"
+	"github.com/abigotado/trello-cli/internal/resolve"
 	"github.com/abigotado/trello-cli/internal/skills"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -1900,5 +1901,105 @@ func TestCreateAndMoveReportTheListTheyResolved(t *testing.T) {
 				t.Errorf("does not report the list it resolved: %s", h.out())
 			}
 		})
+	}
+}
+
+// Creating a label adds to a board's vocabulary, which is a different
+// operation from `labels add` putting an existing one on a card. It also
+// changes the set that --label resolves against, so the cached index for that
+// board has to go.
+func TestLabelsCreate(t *testing.T) {
+	board := "5f2b1c9e4a1d2b3c4d5e6f70"
+	var posted []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/members/me/boards"):
+			fmt.Fprintf(w, `[{"id":%q,"name":"Sprint 12"}]`, board)
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/labels"):
+			posted = append(posted, r.URL.Query().Get("name")+"/"+r.URL.Query().Get("color"))
+			fmt.Fprint(w, `{"id":"8c1d2e3f4a5b60718293a4b5","name":"Blocked","color":"red"}`)
+		default:
+			fmt.Fprint(w, `[]`)
+		}
+	}))
+	defer srv.Close()
+
+	env := map[string]string{
+		"TRELLO_API_KEY":      "k",
+		"TRELLO_TOKEN":        "t",
+		"TRELLO_CLI_BASE_URL": srv.URL,
+	}
+
+	t.Run("creates and reports the label", func(t *testing.T) {
+		posted = nil
+		h := newHarness(t, env, nil)
+		if code := h.run("labels", "create", "--board-id", board, "--name", "Blocked", "--color", "red"); code != errx.CodeOK {
+			t.Fatalf("exit = %d (%s)", code, h.out())
+		}
+		if len(posted) != 1 || posted[0] != "Blocked/red" {
+			t.Errorf("sent %v, want one Blocked/red", posted)
+		}
+		for _, want := range []string{`"name": "Blocked"`, `"color": "red"`, `"id": "8c1d2e3f4a5b60718293a4b5"`} {
+			if !strings.Contains(h.out(), want) {
+				t.Errorf("output is missing %s: %s", want, h.out())
+			}
+		}
+	})
+
+	t.Run("a colour is required", func(t *testing.T) {
+		posted = nil
+		h := newHarness(t, env, nil)
+		if code := h.run("labels", "create", "--board-id", board, "--name", "Blocked"); code != errx.CodeUsage {
+			t.Errorf("exit = %d, want %d", code, errx.CodeUsage)
+		}
+		if len(posted) != 0 {
+			t.Errorf("a rejected create still sent %v", posted)
+		}
+	})
+
+	t.Run("an empty name is allowed, because Trello allows it", func(t *testing.T) {
+		posted = nil
+		h := newHarness(t, env, nil)
+		if code := h.run("labels", "create", "--board-id", board, "--color", "red"); code != errx.CodeOK {
+			t.Fatalf("exit = %d (%s)", code, h.out())
+		}
+		if len(posted) != 1 || posted[0] != "/red" {
+			t.Errorf("sent %v, want one /red", posted)
+		}
+	})
+
+	t.Run("dry run sends nothing", func(t *testing.T) {
+		posted = nil
+		h := newHarness(t, env, nil)
+		if code := h.run("labels", "create", "--board-id", board, "--name", "Blocked", "--color", "red", "--dry-run"); code != errx.CodeOK {
+			t.Fatalf("exit = %d (%s)", code, h.out())
+		}
+		if len(posted) != 0 {
+			t.Errorf("a dry run sent %v", posted)
+		}
+	})
+
+	t.Run("readonly refuses it", func(t *testing.T) {
+		posted = nil
+		ro := map[string]string{"TRELLO_CLI_READONLY": "1"}
+		for k, v := range env {
+			ro[k] = v
+		}
+		h := newHarness(t, ro, nil)
+		if code := h.run("labels", "create", "--board-id", board, "--name", "Blocked", "--color", "red"); code != errx.CodeUsage {
+			t.Errorf("exit = %d, want %d", code, errx.CodeUsage)
+		}
+		if len(posted) != 0 {
+			t.Errorf("a refused create still sent %v", posted)
+		}
+	})
+}
+
+// The scope string a writer invalidates has to be the one the reader keys on.
+// Spelled in two places, they drift and the invalidation silently misses.
+func TestLabelScopeMatchesTheResolverKey(t *testing.T) {
+	if got, want := resolve.LabelScope("abc"), "labels:abc"; got != want {
+		t.Errorf("LabelScope = %q, want %q", got, want)
 	}
 }

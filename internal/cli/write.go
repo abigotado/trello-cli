@@ -534,7 +534,57 @@ func (a *App) labelsWriteCommands() []*cobra.Command {
 			return a.out.Success(changedView{Action: action, CardID: card.ID, TargetID: label.ID})
 		})
 	}
+	var createBoardRef objectRef
+	var labelName, labelColor string
+	create := &cobra.Command{
+		Use:   "create",
+		Short: "Define a new label on a board",
+		Long: "Define a new label on a board.\n\n" +
+			"This adds to the board's vocabulary. 'labels add' is the other thing —\n" +
+			"it puts a label the board already has onto a card.\n\n" +
+			"Colours are Trello's, not this tool's, so they are passed through rather\n" +
+			"than checked against a list here: the light and dark variants did not\n" +
+			"always exist, and a local allowlist would reject colours the API accepts.\n" +
+			"Run 'trello-cli labels list' to see what a board already uses.\n\n" +
+			"A name that an existing label already has is allowed, because Trello\n" +
+			"allows it — but the two become indistinguishable by name afterwards, and\n" +
+			"every later --label lookup for that name is an ambiguity you have to\n" +
+			"resolve with --label-id.",
+		Args: cobra.NoArgs,
+	}
+	createBoardRef.bind(create, "board", "board name, id, or shortLink")
+	create.Flags().StringVar(&labelName, "name", "", "label name (Trello allows an empty one, which can then only be addressed by colour or id)")
+	create.Flags().StringVar(&labelColor, "color", "", "label colour, e.g. green, red, sky_light")
+
+	createCmd := a.newCommand(requires(mutating(create), "board", "color"), func(ctx context.Context, _ *cobra.Command, _ []string) error {
+		if labelColor == "" {
+			return errx.Usage("--color is required")
+		}
+		board, err := a.board(ctx, createBoardRef)
+		if err != nil {
+			return err
+		}
+		if a.dryRun {
+			return a.plan("labels create",
+				map[string]string{"board": board.ID},
+				map[string]string{"name": labelName, "color": labelColor})
+		}
+		client, err := a.trelloClient(ctx)
+		if err != nil {
+			return err
+		}
+		label, err := client.CreateLabel(ctx, board.ID, labelName, labelColor)
+		if err != nil {
+			return err
+		}
+		// The board's label set just changed, so a cached index would resolve
+		// --label against a vocabulary that no longer matches.
+		a.invalidate(resolve.LabelScope(board.ID))
+		return a.out.Success(labelView{label})
+	})
+
 	return []*cobra.Command{
+		createCmd,
 		build("add", "Attach a label to a card", "labels add", false),
 		build("remove", "Detach a label from a card", "labels remove", true),
 	}

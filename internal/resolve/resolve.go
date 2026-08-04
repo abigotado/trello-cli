@@ -153,7 +153,7 @@ func (r *Resolver) Card(ctx context.Context, boardID, query string) (Object, err
 // Trello permits labels with an empty name, so a color-only label is addressed
 // by its color.
 func (r *Resolver) Label(ctx context.Context, boardID, query string) (Object, error) {
-	return r.resolve(ctx, KindLabel, "labels:"+boardID, query, func(ctx context.Context) ([]Object, error) {
+	return r.resolve(ctx, KindLabel, LabelScope(boardID), query, func(ctx context.Context) ([]Object, error) {
 		labels, err := r.Fetcher.Labels(ctx, boardID)
 		if err != nil {
 			return nil, err
@@ -202,9 +202,10 @@ func (r *Resolver) Invalidate(scope string) {
 
 // BoardScope and friends name the cache scopes, so callers can invalidate the
 // exact one a stale id came from.
-func BoardScope() string              { return "boards" }
-func ListScope(boardID string) string { return "lists:" + boardID }
-func CardScope(boardID string) string { return "cards:" + boardID }
+func BoardScope() string               { return "boards" }
+func ListScope(boardID string) string  { return "lists:" + boardID }
+func CardScope(boardID string) string  { return "cards:" + boardID }
+func LabelScope(boardID string) string { return "labels:" + boardID }
 
 // resolve runs the ladder for one kind.
 func (r *Resolver) resolve(

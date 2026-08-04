@@ -106,6 +106,25 @@ func (c *Client) DeleteCard(ctx context.Context, cardID string) error {
 	return c.Delete(ctx, "cards/"+url.PathEscape(cardID), nil)
 }
 
+// CreateLabel defines a new label on a board.
+//
+// This is a different operation from AddLabel, which attaches a label that
+// already exists to a card. A board's label set is the vocabulary; a card
+// carries some of it.
+//
+// The colour is passed through rather than checked against a list here. Trello
+// owns that enum and has extended it — the light and dark variants did not
+// always exist — so a local allowlist would reject colours the API accepts. A
+// rejected colour comes back as a usage error naming what was sent.
+func (c *Client) CreateLabel(ctx context.Context, boardID, name, color string) (Label, error) {
+	q := url.Values{"name": {name}, "color": {color}}
+	var out Label
+	if err := c.Post(ctx, "boards/"+url.PathEscape(boardID)+"/labels", q, &out); err != nil {
+		return Label{}, err
+	}
+	return out, nil
+}
+
 // AddLabel attaches a board label to a card.
 func (c *Client) AddLabel(ctx context.Context, cardID, labelID string) error {
 	q := url.Values{"value": {labelID}}
