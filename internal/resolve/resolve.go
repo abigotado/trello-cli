@@ -289,9 +289,17 @@ func match(kind Kind, query string, objects []Object, fuzzy, strict bool) (Objec
 	}
 
 	// Rungs below here narrow by something less than an exact name, so a
-	// destructive caller stops at this point and reports what it could not
-	// match exactly.
+	// destructive caller stops at this point.
 	if strict {
+		// What it stops with matters. Reporting a refused prefix as "no match"
+		// says the object is absent when it is right there, and an agent that
+		// believes that may create a duplicate of what it meant to delete. So
+		// look one rung further, only to name the reason.
+		if near := filter(objects, func(o Object) bool {
+			return strings.HasPrefix(strings.ToLower(o.Name), lower)
+		}); len(near) > 0 {
+			return Object{}, errx.Inexact(string(kind), query, candidates(kind, near))
+		}
 		return Object{}, errx.NotFound(string(kind), query, suggestions(kind, query, objects))
 	}
 

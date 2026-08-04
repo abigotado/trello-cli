@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -892,8 +893,14 @@ func TestDeleteRefusesAPrefixMatch(t *testing.T) {
 	stub2 := newWriteStub(t)
 	h2 := writeHarness(t, stub2, nil)
 	got := h2.run("cards", "delete", "--board", "Roadmap", "--card", "Ship", "--yes")
-	if got != errx.CodeNotFound {
-		t.Errorf("exit code = %d, want %d: a destructive command must not accept a prefix", got, errx.CodeNotFound)
+	// Exit 2, not 3. The refusal is the point, but the card exists, and this
+	// used to report it as absent — see TestDestructiveRefusalNamesTheReason.
+	// The recovery is to fix the argument, which is what exit 2 means.
+	if got != errx.CodeUsage {
+		t.Errorf("exit code = %d, want %d: a destructive command must not accept a prefix", got, errx.CodeUsage)
+	}
+	if !strings.Contains(h2.out(), "INEXACT_CARD") {
+		t.Errorf("the refusal does not name its reason: %s", h2.out())
 	}
 	if len(stub2.mutations) != 0 {
 		t.Errorf("a refused delete still sent %v", stub2.mutations)
@@ -1769,6 +1776,128 @@ func TestAccountCredentialStateIsNotOverclaimed(t *testing.T) {
 			}
 			if strings.Contains(h.out(), "not authenticated") {
 				t.Error("still claims an account is not authenticated without having checked")
+			}
+		})
+	}
+}
+
+// A destructive command refuses a prefix on purpose, but reporting that as
+// "no card matches" says the object is absent when it is sitting right there.
+// An agent that believes it may create a duplicate of what it was asked to
+// remove.
+func TestDestructiveRefusalNamesTheReason(t *testing.T) {
+	board := "5f2b1c9e4a1d2b3c4d5e6f70"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/members/me/boards"):
+			fmt.Fprintf(w, `[{"id":%q,"name":"Sprint 12","shortLink":"aaaaaaaa"}]`, board)
+		case strings.Contains(r.URL.Path, "/cards"):
+			fmt.Fprint(w, `[{"id":"6a2b1c9e4a1d2b3c4d5e6f80","name":"Ship release","shortLink":"bbbbbbbb"}]`)
+		default:
+			fmt.Fprint(w, `[]`)
+		}
+	}))
+	defer srv.Close()
+
+	env := map[string]string{
+		"TRELLO_API_KEY":      "k",
+		"TRELLO_TOKEN":        "t",
+		"TRELLO_CLI_BASE_URL": srv.URL,
+	}
+
+	tests := []struct {
+		name     string
+		card     string
+		wantCode errx.Code
+		wantJSON []string
+		denyJSON []string
+	}{
+		{
+			// The card exists; only the exactness does not.
+			name: "a prefix is refused with the reason, not with not-found",
+			card: "Ship",
+			// Fixing the argument is the recovery, which is exit 2 — not exit 4,
+			// which means "pick one of several".
+			wantCode: errx.CodeUsage,
+			wantJSON: []string{"INEXACT_CARD", "not the exact name", "Ship release"},
+			denyJSON: []string{"NOT_FOUND", "no card matches"},
+		},
+		{
+			name:     "a name that matches nothing is still not-found",
+			card:     "zzzz",
+			wantCode: errx.CodeNotFound,
+			wantJSON: []string{"NOT_FOUND_CARD", "no card matches"},
+			denyJSON: []string{"INEXACT"},
+		},
+		{
+			name:     "the exact name is accepted",
+			card:     "Ship release",
+			wantCode: errx.CodeOK,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newHarness(t, env, nil)
+			got := h.run("cards", "delete", "--board-id", board, "--card", tt.card, "--yes", "--dry-run")
+			if got != tt.wantCode {
+				t.Fatalf("exit = %d, want %d (%s)", got, tt.wantCode, h.out())
+			}
+			out := h.out()
+			for _, want := range tt.wantJSON {
+				if !strings.Contains(out, want) {
+					t.Errorf("output is missing %q: %s", want, out)
+				}
+			}
+			for _, deny := range tt.denyJSON {
+				if strings.Contains(out, deny) {
+					t.Errorf("output still says %q, which is the misreport being fixed: %s", deny, out)
+				}
+			}
+		})
+	}
+}
+
+// A create that reports the card is in no list contradicts itself: it resolved
+// that list a moment earlier to place the card there.
+func TestCreateAndMoveReportTheListTheyResolved(t *testing.T) {
+	board, list := "5f2b1c9e4a1d2b3c4d5e6f70", "6a2b1c9e4a1d2b3c4d5e6f80"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/members/me/boards"):
+			fmt.Fprintf(w, `[{"id":%q,"name":"Sprint 12"}]`, board)
+		case strings.HasSuffix(r.URL.Path, "/lists"):
+			fmt.Fprintf(w, `[{"id":%q,"name":"Doing"}]`, list)
+		case r.Method == http.MethodPost || r.Method == http.MethodPut:
+			fmt.Fprintf(w, `{"id":"7b1c2d3e4f5061728394a5b2","name":"Fix login","idList":%q}`, list)
+		case strings.Contains(r.URL.Path, "/cards"):
+			fmt.Fprint(w, `[{"id":"7b1c2d3e4f5061728394a5b2","name":"Fix login"}]`)
+		default:
+			fmt.Fprint(w, `[]`)
+		}
+	}))
+	defer srv.Close()
+
+	env := map[string]string{
+		"TRELLO_API_KEY":      "k",
+		"TRELLO_TOKEN":        "t",
+		"TRELLO_CLI_BASE_URL": srv.URL,
+	}
+	for _, tt := range []struct {
+		name string
+		args []string
+	}{
+		{"create", []string{"cards", "create", "--board-id", board, "--list", "Doing", "--name", "Fix login"}},
+		{"move", []string{"cards", "move", "--board-id", board, "--card-id", "7b1c2d3e4f5061728394a5b2", "--list", "Doing"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newHarness(t, env, nil)
+			if code := h.run(tt.args...); code != errx.CodeOK {
+				t.Fatalf("exit = %d (%s)", code, h.out())
+			}
+			if !strings.Contains(h.out(), `"list": "Doing"`) {
+				t.Errorf("does not report the list it resolved: %s", h.out())
 			}
 		})
 	}

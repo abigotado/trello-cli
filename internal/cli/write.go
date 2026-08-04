@@ -234,7 +234,11 @@ func (a *App) cardCreateCommand() *cobra.Command {
 			return err
 		}
 		a.invalidate(resolve.CardScope(board.ID))
-		return a.out.Success(cardView{Card: created})
+		// listName from the target this command just resolved, not from a
+		// second lookup. Returning it empty made a create report that the card
+		// it had placed was in no list at all — the one fact the caller most
+		// wants confirmed, and one already in hand.
+		return a.out.Success(cardView{Card: created, listName: target.Name})
 	})
 }
 
@@ -342,7 +346,10 @@ func (a *App) cardMoveCommand() *cobra.Command {
 		if err != nil {
 			return err
 		}
-		return a.out.Success(cardView{Card: updated})
+		// The destination this command resolved, for the same reason create
+		// reports it: "did it land where I asked" is the question a move is
+		// asked to answer.
+		return a.out.Success(cardView{Card: updated, listName: target.Name})
 	})
 }
 

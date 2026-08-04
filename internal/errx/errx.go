@@ -174,6 +174,30 @@ func Ambiguous(kind, query string, candidates []Candidate) *Error {
 	}
 }
 
+// Inexact reports that a name matched something, but not exactly enough for a
+// command that cannot be undone.
+//
+// This is not NotFound, and the difference matters. A destructive command
+// refuses a prefix on purpose, but reporting that refusal as "no card matches"
+// tells the caller the object is absent when it is sitting right there. An
+// agent that believes it may then create a duplicate of the very thing it was
+// asked to remove.
+//
+// The exit code is CodeUsage because the recovery is to fix the argument —
+// supply the exact name or the id — not to pick from candidates, which is what
+// CodeAmbiguous means.
+func Inexact(kind, query string, candidates []Candidate) *Error {
+	return &Error{
+		Code:   CodeUsage,
+		Reason: "INEXACT_" + upper(kind),
+		Message: fmt.Sprintf(
+			"%q is not the exact name of a %s, and a destructive command will not act on a partial match",
+			query, kind),
+		Hint:       fmt.Sprintf("re-run with the exact name, or with --%s-id from candidates", kind),
+		Candidates: candidates,
+	}
+}
+
 // Auth reports missing, rejected, or expired credentials.
 func Auth(reason, format string, args ...any) *Error {
 	return &Error{
