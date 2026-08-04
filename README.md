@@ -62,13 +62,29 @@ version and leaves `commit` empty.
 
 ## Authenticate
 
-Get an API key at <https://trello.com/power-ups/admin>, authorize it to get a
-token, then store the pair in the OS keychain:
+Get an API key at <https://trello.com/power-ups/admin> and authorize it to get a
+token. Then store the pair in the OS keychain, giving it to `auth login` on
+stdin — the key on the first line, the token on the second:
 
 ```bash
-trello-cli auth login --api-key KEY --token TOKEN                # stored as "default"
-trello-cli auth login --api-key KEY --token TOKEN --account work # a second account
+{ read -rs 'k?API key: '; echo; read -rs 't?Token: '; echo; printf '%s\n%s\n' "$k" "$t" | trello-cli auth login; unset k t; }
 ```
+
+Paste that as **one line**. Split across several, the shell hands the next line
+to `read` instead of waiting for you to type. Nothing echoes while you paste the
+key or the token; that is `read -s` doing its job, not the terminal hanging.
+
+Add `--account work` for a second account — repeat the same line, changing only
+the name. `trello-cli auth default work` then picks which one is used when no
+account is named.
+
+Add `--dry-run` to rehearse: it reports the account it would write to and stores
+nothing.
+
+`--api-key` and `--token` still work and are still part of the contract, but
+prefer stdin. A credential passed as a flag lands in the shell history, and for
+as long as the process runs it is in the argv that `ps` will print for anything
+running as you.
 
 For CI and headless agents, set `TRELLO_API_KEY` and `TRELLO_TOKEN` instead. The
 environment is read before the keychain is touched at all, so an unattended run
@@ -160,6 +176,7 @@ Drop `--dry-run` to apply it.
   validation gate.
 
 Environment: `TRELLO_CLI_BOARD` and `TRELLO_CLI_LIST` supply defaults for
-`--board` and `--list`; `TRELLO_CLI_READONLY` disables every write to Trello;
-`TRELLO_CLI_TIMEOUT`, `TRELLO_CLI_CONCURRENCY`, and `TRELLO_CLI_BASE_URL` tune
-the rest.
+`--board` and `--list`; `TRELLO_CLI_READONLY` disables every write to Trello —
+it takes `1`/`true`/`yes`/`on` or `0`/`false`/`no`/`off`, and refuses anything
+else rather than guess which way you meant it; `TRELLO_CLI_TIMEOUT`,
+`TRELLO_CLI_CONCURRENCY`, and `TRELLO_CLI_BASE_URL` tune the rest.
