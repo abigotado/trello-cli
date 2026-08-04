@@ -53,6 +53,26 @@ func (f *fakeStore) Delete(_ context.Context, account string) error {
 	return nil
 }
 
+// memStore round-trips per account, which fakeStore deliberately does not:
+// its Load returns a preset value rather than whatever was saved. Anything that
+// stores and then reads back — rename, status after login — needs the real
+// behaviour.
+type memStore struct{ creds map[string]auth.Credentials }
+
+func newMemStore() *memStore { return &memStore{creds: map[string]auth.Credentials{}} }
+
+func (m *memStore) Load(_ context.Context, account string) (auth.Credentials, error) {
+	return m.creds[account], nil
+}
+func (m *memStore) Save(_ context.Context, account string, c auth.Credentials) error {
+	m.creds[account] = c
+	return nil
+}
+func (m *memStore) Delete(_ context.Context, account string) error {
+	delete(m.creds, account)
+	return nil
+}
+
 func newHarness(t *testing.T, envs map[string]string, store auth.Store) *harness {
 	t.Helper()
 	dir := t.TempDir()
@@ -1619,4 +1639,137 @@ func stdinFile(t *testing.T, content string) *os.File {
 	}
 	t.Cleanup(func() { f.Close() })
 	return f
+}
+
+// Renaming exists so that a name typed wrongly can be corrected without the
+// credential ever being displayed. Pulling the token out with another tool to
+// paste it back would put it in the terminal scrollback, which is worse than
+// the mistake being fixed.
+func TestAuthRename(t *testing.T) {
+	const key, tok = "KEYVALUE", "TOKENVALUE"
+
+	seed := func(t *testing.T, names ...string) (*harness, *memStore) {
+		t.Helper()
+		store := newMemStore()
+		h := newHarness(t, nil, store)
+		for _, n := range names {
+			h.app.stdin = stdinFile(t, key+"\n"+tok+"\n")
+			if code := h.run("auth", "login", "--account", n); code != errx.CodeOK {
+				t.Fatalf("seeding %s: exit %d (%s)", n, code, h.out())
+			}
+		}
+		return h, store
+	}
+
+	t.Run("moves the credential and takes the default with it", func(t *testing.T) {
+		h, store := seed(t, "personal")
+		if code := h.run("auth", "default", "personal"); code != errx.CodeOK {
+			t.Fatalf("auth default: exit %d", code)
+		}
+		if code := h.run("auth", "rename", "personal", "work"); code != errx.CodeOK {
+			t.Fatalf("rename: exit %d (%s)", code, h.out())
+		}
+		if got := store.creds["work"]; got.APIKey != key || got.Token != tok {
+			t.Errorf("work holds %q/%q, want %q/%q", got.APIKey, got.Token, key, tok)
+		}
+		if _, still := store.creds["personal"]; still {
+			t.Error("the old account was left in the store")
+		}
+		if strings.Contains(h.out(), tok) {
+			t.Error("the envelope echoed the token")
+		}
+		if code := h.run("auth", "list"); code != errx.CodeOK {
+			t.Fatalf("list: exit %d", code)
+		}
+		out := h.out()
+		if !strings.Contains(out, `"account": "work"`) {
+			t.Errorf("the new name is not listed: %s", out)
+		}
+		if strings.Contains(out, `"account": "personal"`) {
+			t.Errorf("the old name survived: %s", out)
+		}
+		if !strings.Contains(out, `"default": true`) {
+			t.Errorf("the default did not move with the account: %s", out)
+		}
+	})
+
+	t.Run("refuses to overwrite an account that exists", func(t *testing.T) {
+		h, _ := seed(t, "personal", "work")
+		if code := h.run("auth", "rename", "personal", "work"); code != errx.CodeUsage {
+			t.Fatalf("exit %d, want %d (%s)", code, errx.CodeUsage, h.out())
+		}
+		if !strings.Contains(h.out(), "ACCOUNT_EXISTS") {
+			t.Errorf("want ACCOUNT_EXISTS, got %s", h.out())
+		}
+		// Both must survive a refusal.
+		h.run("auth", "list")
+		for _, name := range []string{"personal", "work"} {
+			if !strings.Contains(h.out(), `"account": "`+name+`"`) {
+				t.Errorf("%s was lost by a refused rename: %s", name, h.out())
+			}
+		}
+	})
+
+	t.Run("an unknown account is exit 3", func(t *testing.T) {
+		h, _ := seed(t)
+		if code := h.run("auth", "rename", "nope", "work"); code != errx.CodeNotFound {
+			t.Errorf("exit %d, want %d (%s)", code, errx.CodeNotFound, h.out())
+		}
+	})
+
+	t.Run("renaming to the same name is refused", func(t *testing.T) {
+		h, _ := seed(t, "personal")
+		if code := h.run("auth", "rename", "personal", "personal"); code != errx.CodeUsage {
+			t.Errorf("exit %d, want %d", code, errx.CodeUsage)
+		}
+	})
+
+	t.Run("dry run changes nothing", func(t *testing.T) {
+		h, _ := seed(t, "personal")
+		if code := h.run("auth", "rename", "personal", "work", "--dry-run"); code != errx.CodeOK {
+			t.Fatalf("exit %d (%s)", code, h.out())
+		}
+		h.run("auth", "list")
+		if !strings.Contains(h.out(), `"account": "personal"`) {
+			t.Errorf("a dry run moved the account: %s", h.out())
+		}
+	})
+}
+
+// auth list and auth default never read the keychain, so a bool "authenticated"
+// meant they printed "not authenticated" for a perfectly usable account —
+// contradicting auth status about the same account in the same session.
+func TestAccountCredentialStateIsNotOverclaimed(t *testing.T) {
+	h := newHarness(t, nil, newMemStore())
+	h.app.stdin = stdinFile(t, "KEYVALUE\nTOKENVALUE\n")
+	if code := h.run("auth", "login", "--account", "personal"); code != errx.CodeOK {
+		t.Fatalf("login: exit %d (%s)", code, h.out())
+	}
+
+	tests := []struct {
+		name string
+		args []string
+		want Credential
+	}{
+		// Reached the keychain, so it can say more than the registry knows.
+		{name: "login", args: []string{"auth", "login", "--account", "personal"}, want: CredentialPresent},
+		{name: "status", args: []string{"auth", "status", "--account", "personal"}, want: CredentialPresent},
+		// Registry only, which is exactly "a credential was stored here".
+		{name: "list", args: []string{"auth", "list"}, want: CredentialStored},
+		{name: "default", args: []string{"auth", "default", "personal"}, want: CredentialStored},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h.app.stdin = stdinFile(t, "KEYVALUE\nTOKENVALUE\n")
+			if code := h.run(tt.args...); code != errx.CodeOK {
+				t.Fatalf("exit %d (%s)", code, h.out())
+			}
+			if got := h.out(); !strings.Contains(got, `"credential": "`+string(tt.want)+`"`) {
+				t.Errorf("want credential %q, got %s", tt.want, got)
+			}
+			if strings.Contains(h.out(), "not authenticated") {
+				t.Error("still claims an account is not authenticated without having checked")
+			}
+		})
+	}
 }

@@ -81,6 +81,10 @@ account is named.
 Add `--dry-run` to rehearse: it reports the account it would write to and stores
 nothing.
 
+Put the wrong credential under a name? `trello-cli auth rename old new` moves it
+without ever displaying it, and carries the default across if it was the
+default. It refuses to overwrite a name that already exists.
+
 `--api-key` and `--token` still work and are still part of the contract, but
 prefer stdin. A credential passed as a flag lands in the shell history, and for
 as long as the process runs it is in the argv that `ps` will print for anything

@@ -96,6 +96,14 @@ Remove one account's stored credentials
 
 No flags of its own.
 
+### `trello-cli auth rename`  **W**
+
+Move an account's stored credentials to a different name
+
+Usage: `trello-cli auth rename <old> <new>`
+
+No flags of its own.
+
 ### `trello-cli auth status`
 
 Report which credentials this invocation would use

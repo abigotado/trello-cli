@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 
@@ -70,6 +71,7 @@ func (a *App) newAuthCommand() *cobra.Command {
 		a.newAuthStatusCommand(),
 		a.newAuthListCommand(),
 		a.newAuthDefaultCommand(),
+		a.newAuthRenameCommand(),
 		a.newAuthLogoutCommand(),
 	)
 	return cmd
@@ -148,11 +150,11 @@ func (a *App) newAuthLoginCommand() *cobra.Command {
 		}
 		creds := auth.Credentials{APIKey: apiKey, Token: token}
 		view := accountView{
-			Account:       name,
-			Authenticated: true,
-			Source:        auth.SourceKeyring,
-			APIKeySuffix:  keySuffix(creds.APIKey),
-			Fingerprint:   creds.Fingerprint(),
+			Account:      name,
+			Credential:   CredentialPresent,
+			Source:       auth.SourceKeyring,
+			APIKeySuffix: keySuffix(creds.APIKey),
+			Fingerprint:  creds.Fingerprint(),
 		}
 		if a.dryRun {
 			// planView, not accountView: a dry run that returned the success
@@ -188,17 +190,17 @@ func (a *App) newAuthStatusCommand() *cobra.Command {
 				// unreadable still is a failure, so only these reasons pass.
 				var typed *errx.Error
 				if errors.As(err, &typed) && (typed.Reason == "NOT_AUTHENTICATED" || typed.Reason == "UNKNOWN_ACCOUNT") {
-					return a.out.Success(accountView{Source: auth.SourceNone})
+					return a.out.Success(accountView{Credential: CredentialNone, Source: auth.SourceNone})
 				}
 				return err
 			}
 			return a.out.Success(accountView{
-				Account:       res.Account,
-				Authenticated: true,
-				Source:        res.Source,
-				APIKeySuffix:  keySuffix(res.Credentials.APIKey),
-				Fingerprint:   res.Credentials.Fingerprint(),
-				Default:       res.Account != "" && a.registry.Default() == res.Account,
+				Account:      res.Account,
+				Credential:   CredentialPresent,
+				Source:       res.Source,
+				APIKeySuffix: keySuffix(res.Credentials.APIKey),
+				Fingerprint:  res.Credentials.Fingerprint(),
+				Default:      res.Account != "" && a.registry.Default() == res.Account,
 			})
 		},
 	)
@@ -222,14 +224,16 @@ func (a *App) newAuthListCommand() *cobra.Command {
 		names := a.registry.List()
 		views := make([]accountView, 0, len(names))
 		for _, name := range names {
-			view := accountView{Account: name, Default: a.registry.Default() == name}
+			// Registry membership is not a guess: login registers a name only
+			// after the credential lands, and logout removes both.
+			view := accountView{Account: name, Credential: CredentialStored, Default: a.registry.Default() == name}
 			// Deliberately not read by default. Loading every account meant one
 			// keychain access per account, and on macOS an unsigned binary
 			// raises a modal prompt for each — so an agent calling this to
 			// discover accounts would hang on the first invisible dialog.
 			if check {
 				if creds, err := a.store.Load(ctx, name); err == nil && creds.Valid() {
-					view.Authenticated = true
+					view.Credential = CredentialPresent
 					view.Source = auth.SourceKeyring
 					view.APIKeySuffix = keySuffix(creds.APIKey)
 					view.Fingerprint = creds.Fingerprint()
@@ -267,7 +271,94 @@ func (a *App) newAuthDefaultCommand() *cobra.Command {
 		if err := a.registry.SetDefault(name); err != nil {
 			return err
 		}
-		return a.out.Success(accountView{Account: name, Default: true})
+		// SetDefault refuses a name the registry does not have, so reaching
+		// here means a credential is stored under it. Saying nothing about the
+		// credential would print "none" for an account that has one.
+		return a.out.Success(accountView{Account: name, Credential: CredentialStored, Default: true})
+	})
+}
+
+func (a *App) newAuthRenameCommand() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "rename <old> <new>",
+		Short: "Move an account's stored credentials to a different name",
+		Long: "Move an account's stored credentials to a different name.\n\n" +
+			"The credential is read and re-stored without ever being displayed, so\n" +
+			"this is the way to correct a name you typed wrongly — pulling the token\n" +
+			"out with another tool to paste it back would put it in your terminal\n" +
+			"scrollback, which is worse than the mistake.\n\n" +
+			"Refuses to overwrite an existing account: log that one out first if you\n" +
+			"really mean to replace it. If <old> was the default, <new> becomes it.",
+		Args: cobra.ExactArgs(2),
+		Annotations: map[string]string{
+			annotationMutates: "true",
+		},
+	}
+	return a.newCommand(cmd, func(ctx context.Context, _ *cobra.Command, args []string) error {
+		from, to := args[0], args[1]
+		// --account names the account an invocation acts on everywhere else, so
+		// letting it sit unused beside two positionals would be the one place
+		// it silently means nothing.
+		if a.account != "" && a.account != from {
+			return errx.Usage("auth rename takes the account as its first argument; --account %s contradicts it", a.account)
+		}
+		if err := auth.ValidateAccountName(from); err != nil {
+			return err
+		}
+		if err := auth.ValidateAccountName(to); err != nil {
+			return err
+		}
+		if from == to {
+			return errx.Usage("the new name is the same as the old one")
+		}
+		if !a.registry.Has(from) {
+			return errx.NotFound("account", from, nil)
+		}
+		if a.registry.Has(to) {
+			return &errx.Error{
+				Code:    errx.CodeUsage,
+				Reason:  "ACCOUNT_EXISTS",
+				Message: fmt.Sprintf("an account named %q already exists", to),
+				Hint:    "run 'trello-cli auth logout --account " + to + "' first if you mean to replace it",
+			}
+		}
+		wasDefault := a.registry.Default() == from
+		if a.dryRun {
+			return a.plan("auth rename", map[string]string{"from": from, "to": to}, nil)
+		}
+
+		creds, err := a.store.Load(ctx, from)
+		if err != nil {
+			return err
+		}
+		// Written before the old one is removed. The reverse order would lose
+		// the credential outright if the save failed, and a rename that can
+		// destroy what it was moving is not worth having.
+		if err := a.store.Save(ctx, to, creds); err != nil {
+			return err
+		}
+		if err := a.registry.Add(to); err != nil {
+			return err
+		}
+		if err := a.store.Delete(ctx, from); err != nil {
+			return err
+		}
+		if err := a.registry.Remove(from); err != nil {
+			return err
+		}
+		if wasDefault {
+			if err := a.registry.SetDefault(to); err != nil {
+				return err
+			}
+		}
+		return a.out.Success(accountView{
+			Account:      to,
+			Credential:   CredentialPresent,
+			Source:       auth.SourceKeyring,
+			APIKeySuffix: keySuffix(creds.APIKey),
+			Fingerprint:  creds.Fingerprint(),
+			Default:      a.registry.Default() == to,
+		})
 	})
 }
 
