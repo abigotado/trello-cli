@@ -58,6 +58,13 @@ type Field struct {
 	// Raw is the value used when this field is projected into JSON, so
 	// booleans and numbers do not become strings.
 	Raw any
+	// OnRequest keeps a field out of the default output while leaving it
+	// selectable by name. A card description is the case this exists for: it
+	// can run to paragraphs, so putting it in every row of a 175-card listing
+	// would spend the caller's context on something it did not ask for — but
+	// leaving it unreadable altogether made `cards update --desc` overwrite
+	// text nothing could show first.
+	OnRequest bool
 }
 
 // Renderable is an entity that can describe itself as ordered fields.
@@ -227,7 +234,13 @@ func (w *Writer) encode(v any) error {
 // dropped column in the other.
 func selectFields(available []Field, want []string) ([]Field, error) {
 	if len(want) == 0 {
-		return available, nil
+		def := make([]Field, 0, len(available))
+		for _, f := range available {
+			if !f.OnRequest {
+				def = append(def, f)
+			}
+		}
+		return def, nil
 	}
 	selected := make([]Field, 0, len(want))
 	for _, name := range want {

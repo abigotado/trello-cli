@@ -66,6 +66,10 @@ func (c cardView) Fields() []output.Field {
 		{Name: "id", Value: c.ID, Raw: c.ID},
 		{Name: "shortLink", Value: c.ShortLink, Raw: c.ShortLink},
 		{Name: "name", Value: c.Name, Raw: c.Name},
+		// OnRequest: a description can run to paragraphs, and putting one in
+		// every row of a large listing would spend the caller's context on
+		// something it did not ask for. Ask for it with --fields desc.
+		{Name: "desc", Value: c.Desc, Raw: c.Desc, OnRequest: true},
 		{Name: "list", Value: c.listName, Raw: c.listName},
 		{Name: "due", Value: due, Raw: c.Due},
 		{Name: "dueComplete", Value: "", Raw: c.DueComplete},

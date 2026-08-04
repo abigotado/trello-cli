@@ -2166,3 +2166,82 @@ func leafHasFlag(t *testing.T, path, flag string) bool {
 	walk(NewApp().NewRootCommand())
 	return found
 }
+
+// The description was write-only: `cards create --desc` and `cards update
+// --desc` set it, and nothing could read it back — not --fields, which
+// rejected the name, and not -o raw, since the client never asked Trello for
+// the field. So an update overwrote text the tool could not have shown first.
+func TestCardDescriptionIsReadableOnRequestOnly(t *testing.T) {
+	board, card := "5f2b1c9e4a1d2b3c4d5e6f70", "6a2b1c9e4a1d2b3c4d5e6f80"
+	var asked []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if f := r.URL.Query().Get("fields"); f != "" {
+			asked = append(asked, f)
+		}
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/members/me/boards"):
+			fmt.Fprintf(w, `[{"id":%q,"name":"Sprint 12"}]`, board)
+		case strings.HasSuffix(r.URL.Path, "/cards/"+card):
+			fmt.Fprintf(w, `{"id":%q,"name":"Fix login","desc":"the long story"}`, card)
+		case strings.Contains(r.URL.Path, "/cards"):
+			fmt.Fprintf(w, `[{"id":%q,"name":"Fix login","desc":"the long story"}]`, card)
+		default:
+			fmt.Fprint(w, `[]`)
+		}
+	}))
+	defer srv.Close()
+
+	env := map[string]string{
+		"TRELLO_API_KEY":      "k",
+		"TRELLO_TOKEN":        "t",
+		"TRELLO_CLI_BASE_URL": srv.URL,
+	}
+
+	tests := []struct {
+		name      string
+		args      []string
+		wantShown bool
+		wantAsked bool
+	}{
+		{
+			name: "default output neither shows nor fetches it",
+			args: []string{"cards", "get", "--board-id", board, "--card-id", card},
+		},
+		{
+			// Fetching descriptions costs real time on a large board, so it is
+			// not paid unless the caller wants them.
+			name:      "--fields desc shows it, and only then is it fetched",
+			args:      []string{"cards", "get", "--board-id", board, "--card-id", card, "--fields", "id,desc"},
+			wantShown: true, wantAsked: true,
+		},
+		{
+			// -o raw prints the decoded type, so a field the client never
+			// requested would sit there permanently empty.
+			name:      "-o raw fetches it too",
+			args:      []string{"cards", "get", "--board-id", board, "--card-id", card, "-o", "raw"},
+			wantShown: true, wantAsked: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			asked = nil
+			h := newHarness(t, env, nil)
+			if code := h.run(tt.args...); code != errx.CodeOK {
+				t.Fatalf("exit = %d (%s)", code, h.out())
+			}
+			if shown := strings.Contains(h.out(), "the long story"); shown != tt.wantShown {
+				t.Errorf("description shown = %v, want %v: %s", shown, tt.wantShown, h.out())
+			}
+			fetched := false
+			for _, f := range asked {
+				if strings.Contains(f, "desc") {
+					fetched = true
+				}
+			}
+			if fetched != tt.wantAsked {
+				t.Errorf("asked Trello for desc = %v, want %v (fields sent: %v)", fetched, tt.wantAsked, asked)
+			}
+		})
+	}
+}

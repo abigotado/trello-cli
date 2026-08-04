@@ -121,8 +121,17 @@ It is **not** a passthrough of Trello's REST response: the binary decodes into
 its own types first, so a field trello-cli does not model is not there to be
 had — by any route. `--fields` rejects a name it does not know and lists the
 ones it has, which is the fastest way to find out what a command can give you.
-A card's description is the field people look for and it is not modelled, so no
-flag and no command will produce it; say so rather than hunting.
+A card's description is the field people look for. It is modelled, but kept out
+of the default output because it can run to paragraphs and a listing of it would
+be mostly description. Ask for it by name:
+
+```
+trello-cli cards get --card "Fix login" --fields id,name,desc
+```
+
+Read it before you write it. `cards update --desc` replaces the description
+outright — there is no append — so fetch the current text first unless you mean
+to discard it.
 
 ## Where to look next
 

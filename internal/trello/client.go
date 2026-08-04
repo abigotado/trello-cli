@@ -51,6 +51,9 @@ type Client struct {
 
 	// sem bounds concurrent requests for commands that fan out.
 	sem chan struct{}
+	// descriptions makes card reads ask for the desc field. See
+	// WithDescriptions for why it is off unless the caller wants it.
+	descriptions bool
 	// serial guards the routes Trello gives their own low limits.
 	serial sync.Mutex
 
@@ -69,6 +72,16 @@ type Option func(*Client)
 
 // WithHTTPClient replaces the underlying HTTP client.
 func WithHTTPClient(h *http.Client) Option { return func(c *Client) { c.http = h } }
+
+// WithDescriptions makes card reads fetch the description field.
+//
+// Off by default, and the reason is measured rather than assumed: on a
+// 175-card board the descriptions come to 168 KB and add about a sixth to the
+// time of a listing. That is a cost worth nothing when the caller did not ask
+// for them, and boards only grow. The client is told whether to include them
+// rather than being handed the caller's --fields, so it stays ignorant of how
+// the command line is spelled.
+func WithDescriptions() Option { return func(c *Client) { c.descriptions = true } }
 
 // WithLogger sets the destination for verbose request logging. The logger must
 // write to stderr: stdout carries only the response envelope.

@@ -603,3 +603,47 @@ func TestRawIsNotAPassthrough(t *testing.T) {
 		t.Error("raw somehow produced an unmodelled field")
 	}
 }
+
+// A field can be worth having and still not be worth printing by default. A
+// card description is the case: it can run to paragraphs, so putting one in
+// every row of a large listing spends the caller's context on something it did
+// not ask for — but leaving it unreadable altogether meant `cards update
+// --desc` overwrote text nothing could show first.
+func TestOnRequestFieldsAreSelectableButNotDefault(t *testing.T) {
+	available := []Field{
+		{Name: "id", Value: "1", Raw: "1"},
+		{Name: "desc", Value: "long", Raw: "long", OnRequest: true},
+		{Name: "name", Value: "Fix login", Raw: "Fix login"},
+	}
+
+	tests := []struct {
+		name    string
+		fields  []string
+		want    []string
+		wantErr bool
+	}{
+		{name: "default output omits it", want: []string{"id", "name"}},
+		{name: "naming it selects it", fields: []string{"id", "desc"}, want: []string{"id", "desc"}},
+		{name: "it can be the only field", fields: []string{"desc"}, want: []string{"desc"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := selectFields(available, tt.fields)
+			if err != nil {
+				t.Fatalf("selectFields: %v", err)
+			}
+			names := make([]string, 0, len(got))
+			for _, f := range got {
+				names = append(names, f.Name)
+			}
+			if strings.Join(names, ",") != strings.Join(tt.want, ",") {
+				t.Errorf("fields = %v, want %v", names, tt.want)
+			}
+		})
+	}
+
+	// Still rejected when misspelled, rather than silently dropped.
+	if _, err := selectFields(available, []string{"descr"}); err == nil {
+		t.Error("an unknown field was accepted")
+	}
+}

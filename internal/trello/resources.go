@@ -22,6 +22,15 @@ var (
 	memberListFields = []string{"id", "username", "fullName"}
 )
 
+// cardFieldList is what a card read asks Trello for, with the description
+// appended only when this client was built to want it.
+func (c *Client) cardFieldList() string {
+	if c.descriptions {
+		return strings.Join(append(append([]string{}, cardFields...), "desc"), ",")
+	}
+	return strings.Join(cardFields, ",")
+}
+
 // Board is a Trello board.
 type Board struct {
 	ID           string `json:"id"`
@@ -50,8 +59,12 @@ type Label struct {
 
 // Card is a Trello card.
 type Card struct {
-	ID          string   `json:"id"`
-	Name        string   `json:"name"`
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	// Desc is fetched but kept out of the default field set; see the OnRequest
+	// flag in internal/output. Without it, `cards update --desc` overwrote a
+	// description no command could read back.
+	Desc        string   `json:"desc,omitempty"`
 	ShortLink   string   `json:"shortLink"`
 	IDList      string   `json:"idList"`
 	Due         string   `json:"due,omitempty"`
@@ -191,7 +204,7 @@ func (c *Client) CardsOnBoard(ctx context.Context, boardID string, includeClosed
 
 func (c *Client) cards(ctx context.Context, path string, includeClosed bool) ([]Card, error) {
 	q := url.Values{
-		"fields": {strings.Join(cardFields, ",")},
+		"fields": {c.cardFieldList()},
 		"filter": {"open"},
 	}
 	if includeClosed {
@@ -207,7 +220,7 @@ func (c *Client) cards(ctx context.Context, path string, includeClosed bool) ([]
 // Card returns one card by id or shortLink.
 func (c *Client) Card(ctx context.Context, id string) (Card, error) {
 	var card Card
-	q := url.Values{"fields": {strings.Join(cardFields, ",")}}
+	q := url.Values{"fields": {c.cardFieldList()}}
 	if err := c.Get(ctx, "cards/"+url.PathEscape(id), q, &card); err != nil {
 		return Card{}, err
 	}
@@ -297,7 +310,7 @@ func (c *Client) Search(ctx context.Context, query string, limit int) (SearchRes
 		"query":        {query},
 		"modelTypes":   {"boards,cards"},
 		"board_fields": {strings.Join(boardFields, ",")},
-		"card_fields":  {strings.Join(cardFields, ",")},
+		"card_fields":  {c.cardFieldList()},
 	}
 	if limit > 0 {
 		q.Set("boards_limit", strconv.Itoa(limit))

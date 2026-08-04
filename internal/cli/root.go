@@ -240,13 +240,31 @@ func (a *App) trelloClient(ctx context.Context) (*trello.Client, error) {
 		return nil, err
 	}
 	a.token = res.Credentials.Token
+	opts := []trello.Option{trello.WithLogger(a.log)}
+	// Descriptions are fetched only when the caller named the field, so the
+	// common listing does not carry text nobody asked for. -o raw is the other
+	// case that wants them: it prints the decoded type, and a field the client
+	// never requested would be permanently empty there.
+	if a.wantsField("desc") || a.format == string(output.FormatRaw) {
+		opts = append(opts, trello.WithDescriptions())
+	}
 	a.client = trello.New(
 		a.cfg.BaseURL,
 		trello.Credentials{APIKey: res.Credentials.APIKey, Token: res.Credentials.Token},
 		a.cfg.Concurrency,
-		trello.WithLogger(a.log),
+		opts...,
 	)
 	return a.client, nil
+}
+
+// wantsField reports whether --fields named this one.
+func (a *App) wantsField(name string) bool {
+	for _, f := range a.fields {
+		if f == name {
+			return true
+		}
+	}
+	return false
 }
 
 // resolveCredentials picks the credentials this invocation should use.
