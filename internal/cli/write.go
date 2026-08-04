@@ -583,10 +583,51 @@ func (a *App) labelsWriteCommands() []*cobra.Command {
 		return a.out.Success(labelView{label})
 	})
 
+	var deleteBoardRef, deleteLabelRef objectRef
+	del := &cobra.Command{
+		Use:   "delete",
+		Short: "Remove a label from the board entirely",
+		Long: "Remove a label from the board entirely.\n\n" +
+			"This is not 'labels remove', which takes a label off one card. This\n" +
+			"deletes the label itself, and Trello strips it from every card that\n" +
+			"carried it. There is no undo.",
+		Args: cobra.NoArgs,
+	}
+	deleteBoardRef.bind(del, "board", "board name, id, or shortLink")
+	deleteLabelRef.bind(del, "label", "label name or color")
+
+	deleteCmd := a.newCommand(requires(destructive(del), "board", "label"), func(ctx context.Context, _ *cobra.Command, _ []string) error {
+		board, err := a.board(ctx, deleteBoardRef)
+		if err != nil {
+			return err
+		}
+		r, err := a.resolver(ctx)
+		if err != nil {
+			return err
+		}
+		label, err := r.Label(ctx, board.ID, deleteLabelRef.nameOrID())
+		if err != nil {
+			return err
+		}
+		if a.dryRun {
+			return a.plan("labels delete", map[string]string{"board": board.ID, "label": label.ID}, nil)
+		}
+		client, err := a.trelloClient(ctx)
+		if err != nil {
+			return err
+		}
+		if err := client.DeleteLabel(ctx, label.ID); err != nil {
+			return err
+		}
+		a.invalidate(resolve.LabelScope(board.ID))
+		return a.out.Success(changedView{Action: "labels delete", TargetID: label.ID})
+	})
+
 	return []*cobra.Command{
 		createCmd,
 		build("add", "Attach a label to a card", "labels add", false),
 		build("remove", "Detach a label from a card", "labels remove", true),
+		deleteCmd,
 	}
 }
 

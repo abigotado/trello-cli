@@ -79,7 +79,12 @@ func (a *App) resolver(ctx context.Context) (*resolve.Resolver, error) {
 		// the caller cannot even see.
 		cache = resolve.NewCache(a.token, 0)
 	}
-	a.res = &resolve.Resolver{Fetcher: client, Cache: cache, Fuzzy: a.fuzzy}
+	// Strictness comes from the command's own annotation rather than from the
+	// caller remembering to ask for it. It was opt-in, and `labels delete`
+	// shipped without it — a destructive command that happily acted on a
+	// prefix. Anything a tree walk can decide should not be a thing to
+	// remember.
+	a.res = &resolve.Resolver{Fetcher: client, Cache: cache, Fuzzy: a.fuzzy, Strict: a.strictResolution}
 	return a.res, nil
 }
 

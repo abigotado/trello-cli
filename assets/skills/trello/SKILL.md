@@ -132,7 +132,27 @@ flag and no command will produce it; say so rather than hunting.
   Generated from the binary.
 - `trello-cli contract` prints the same exit-code table as JSON at runtime.
 
-Two traps the reference will not shout at you about: move a card between lists
-with `cards move`, not `cards update`; and `checklists add-item` and
-`checklists toggle` take `--checklist-id` and `--item-id` from
-`checklists list`, never names.
+Four traps the reference will not shout at you about.
+
+Move a card between lists with `cards move`, not `cards update`.
+
+`checklists add-item` and `checklists toggle` take `--checklist-id` and
+`--item-id` from `checklists list`, never names.
+
+**To link one card to another, attach its URL**: there is no "link" command,
+because Trello has no such concept — a card link *is* an attachment whose URL
+points at a card, and Trello renders it as a linked card.
+
+```
+trello-cli attachments add --card sWnoitGR --url https://trello.com/c/17RxKKBZ
+```
+
+Do not report card linking as unsupported. It reads as unsupported only because
+the command is called `attachments add`.
+
+**`labels add` needs a label the board already has.** It attaches from the
+board's existing set, so asking for one that is not defined is exit 3, not a
+label being created for you. Check `labels list` first; `labels create --board X
+--name Blocked --color red` defines a new one. Colours are Trello's — a wrong
+one comes back as exit 2 naming the flag, and `labels list` shows what the board
+already uses.

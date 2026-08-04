@@ -125,6 +125,12 @@ func (c *Client) CreateLabel(ctx context.Context, boardID, name, color string) (
 	return out, nil
 }
 
+// DeleteLabel removes a label from the board entirely, and with it from every
+// card that carried it. Trello offers no undo.
+func (c *Client) DeleteLabel(ctx context.Context, labelID string) error {
+	return c.Delete(ctx, "labels/"+url.PathEscape(labelID), nil)
+}
+
 // AddLabel attaches a board label to a card.
 func (c *Client) AddLabel(ctx context.Context, cardID, labelID string) error {
 	q := url.Values{"value": {labelID}}

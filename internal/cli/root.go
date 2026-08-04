@@ -88,7 +88,10 @@ type App struct {
 	jsonAlias bool
 	fuzzy     bool
 	noCache   bool
-	account   string
+	// strictResolution stops the resolution ladder at an exact name. Set from
+	// the destructive annotation, not by the command body.
+	strictResolution bool
+	account          string
 
 	// cancels holds the context cancels to run when Execute returns. Kept on
 	// the App rather than at package scope so two Apps in one test process
@@ -285,8 +288,15 @@ func (a *App) newCommand(cmd *cobra.Command, run func(context.Context, *cobra.Co
 					Hint:    "report this and stop; only whoever set TRELLO_CLI_READONLY should clear it",
 				}
 			}
-			if a.isDestructive(c) && !a.assumeYes && !a.dryRun {
-				return errx.ConfirmRequired(c.CommandPath())
+			if a.isDestructive(c) {
+				// Set before the confirmation gate, and before any resolver is
+				// built, so it holds even on the --dry-run path that skips the
+				// gate: a dry run that resolved a prefix would report a target
+				// the real command then refuses.
+				a.strictResolution = true
+				if !a.assumeYes && !a.dryRun {
+					return errx.ConfirmRequired(c.CommandPath())
+				}
 			}
 		}
 		return inner(c.Context(), c, args)

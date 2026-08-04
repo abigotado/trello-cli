@@ -2003,3 +2003,166 @@ func TestLabelScopeMatchesTheResolverKey(t *testing.T) {
 		t.Errorf("LabelScope = %q, want %q", got, want)
 	}
 }
+
+// labels delete removes the label from the board, which is a different and
+// much larger act than labels remove taking it off one card — Trello strips it
+// from every card that carried it, with no undo. So it is destructive, and the
+// confirmation rail has to hold.
+func TestLabelsDelete(t *testing.T) {
+	board, label := "5f2b1c9e4a1d2b3c4d5e6f70", "8c1d2e3f4a5b60718293a4b5"
+	var deleted []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/members/me/boards"):
+			fmt.Fprintf(w, `[{"id":%q,"name":"Sprint 12"}]`, board)
+		case strings.HasSuffix(r.URL.Path, "/labels") && r.Method == http.MethodGet:
+			fmt.Fprintf(w, `[{"id":%q,"name":"Blocked","color":"red"}]`, label)
+		case r.Method == http.MethodDelete:
+			deleted = append(deleted, r.URL.Path)
+			fmt.Fprint(w, `{}`)
+		default:
+			fmt.Fprint(w, `[]`)
+		}
+	}))
+	defer srv.Close()
+
+	env := map[string]string{
+		"TRELLO_API_KEY":      "k",
+		"TRELLO_TOKEN":        "t",
+		"TRELLO_CLI_BASE_URL": srv.URL,
+	}
+
+	tests := []struct {
+		name     string
+		args     []string
+		wantCode errx.Code
+		wantSent bool
+	}{
+		{
+			name:     "refuses without --yes",
+			args:     []string{"labels", "delete", "--board-id", board, "--label", "Blocked"},
+			wantCode: errx.CodeConfirm,
+		},
+		{
+			// The label exists under a longer name; a destructive command will
+			// not act on a partial match, and must say so rather than deny it.
+			name:     "refuses a prefix even with --yes",
+			args:     []string{"labels", "delete", "--board-id", board, "--label", "Block", "--yes"},
+			wantCode: errx.CodeUsage,
+		},
+		{
+			name:     "a dry run sends nothing",
+			args:     []string{"labels", "delete", "--board-id", board, "--label", "Blocked", "--dry-run"},
+			wantCode: errx.CodeOK,
+		},
+		{
+			name:     "deletes with the exact name and --yes",
+			args:     []string{"labels", "delete", "--board-id", board, "--label", "Blocked", "--yes"},
+			wantCode: errx.CodeOK,
+			wantSent: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			deleted = nil
+			h := newHarness(t, env, nil)
+			if got := h.run(tt.args...); got != tt.wantCode {
+				t.Fatalf("exit = %d, want %d (%s)", got, tt.wantCode, h.out())
+			}
+			if sent := len(deleted) > 0; sent != tt.wantSent {
+				t.Errorf("sent a delete: %v, want %v (%v)", sent, tt.wantSent, deleted)
+			}
+			if tt.wantSent && !strings.Contains(deleted[0], label) {
+				t.Errorf("deleted %q, which does not name the label", deleted[0])
+			}
+		})
+	}
+}
+
+// Strictness used to be opt-in, and `labels delete` shipped without it: a
+// command that destroys a board's label happily acted on a prefix. It is now
+// derived from the destructive annotation, and this walks the tree so the next
+// one cannot forget either.
+func TestEveryDestructiveCommandRefusesAPrefix(t *testing.T) {
+	var destructive []string
+	var walk func(*cobra.Command)
+	walk = func(c *cobra.Command) {
+		if c.Annotations[annotationDestructive] != "" {
+			destructive = append(destructive, c.CommandPath())
+		}
+		for _, sub := range c.Commands() {
+			walk(sub)
+		}
+	}
+	walk(NewApp().NewRootCommand())
+	if len(destructive) == 0 {
+		t.Fatal("no destructive commands found, so this test proves nothing")
+	}
+
+	board := "5f2b1c9e4a1d2b3c4d5e6f70"
+	var mutations []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method != http.MethodGet {
+			mutations = append(mutations, r.Method+" "+r.URL.Path)
+		}
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/members/me/boards"):
+			fmt.Fprintf(w, `[{"id":%q,"name":"Sprint 12"}]`, board)
+		case strings.HasSuffix(r.URL.Path, "/labels"):
+			fmt.Fprint(w, `[{"id":"8c1d2e3f4a5b60718293a4b5","name":"Blocked release","color":"red"}]`)
+		case strings.Contains(r.URL.Path, "/cards"):
+			fmt.Fprint(w, `[{"id":"6a2b1c9e4a1d2b3c4d5e6f80","name":"Blocked release","shortLink":"bbbbbbbb"}]`)
+		case strings.HasSuffix(r.URL.Path, "/lists"):
+			fmt.Fprint(w, `[{"id":"7b1c2d3e4f5061728394a5b2","name":"Blocked release"}]`)
+		default:
+			fmt.Fprint(w, `[]`)
+		}
+	}))
+	defer srv.Close()
+
+	env := map[string]string{
+		"TRELLO_API_KEY":      "k",
+		"TRELLO_TOKEN":        "t",
+		"TRELLO_CLI_BASE_URL": srv.URL,
+	}
+
+	for _, path := range destructive {
+		t.Run(path, func(t *testing.T) {
+			mutations = nil
+			h := newHarness(t, env, nil)
+			args := strings.Fields(strings.TrimPrefix(path, "trello-cli "))
+			// "Blocked" is a unique prefix of the one object each stub holds.
+			args = append(args, "--board-id", board, "--yes")
+			for _, flag := range []string{"card", "label", "list"} {
+				if leafHasFlag(t, path, flag) {
+					args = append(args, "--"+flag, "Blocked")
+				}
+			}
+			if got := h.run(args...); got == errx.CodeOK {
+				t.Errorf("accepted a prefix and exited 0: %s", h.out())
+			}
+			if len(mutations) != 0 {
+				t.Errorf("acted on a prefix match: %v", mutations)
+			}
+		})
+	}
+}
+
+// leafHasFlag reports whether the command at path defines flag.
+func leafHasFlag(t *testing.T, path, flag string) bool {
+	t.Helper()
+	var found bool
+	var walk func(*cobra.Command)
+	walk = func(c *cobra.Command) {
+		if c.CommandPath() == path {
+			found = c.Flags().Lookup(flag) != nil
+		}
+		for _, sub := range c.Commands() {
+			walk(sub)
+		}
+	}
+	walk(NewApp().NewRootCommand())
+	return found
+}

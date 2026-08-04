@@ -328,6 +328,17 @@ Requires: `--board`, `--color`
 | `--color` | string |  | label colour, e.g. green, red, sky_light |
 | `--name` | string |  | label name (Trello allows an empty one, which can then only be addressed by colour or id) |
 
+### `trello-cli labels delete`  **W D**
+
+Remove a label from the board entirely
+
+Requires: `--board`, `--label`
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--board` | string |  | board name, id, or shortLink |
+| `--label` | string |  | label name or color |
+
 ### `trello-cli labels list`
 
 List the labels defined on a board
