@@ -350,8 +350,12 @@ func textCell(f Field) string {
 	if f.Raw == nil {
 		return ""
 	}
+	// A raw string has not been through whatever the view does to make a value
+	// safe to print. A comment body is the case that matters: its Value is
+	// collapsed precisely because newlines would break one-line-per-entity, and
+	// falling back to the uncollapsed original would undo that.
 	if s, ok := f.Raw.(string); ok {
-		return s
+		return singleLine(s)
 	}
 	switch v := reflect.ValueOf(f.Raw); v.Kind() {
 	case reflect.Map, reflect.Slice:
@@ -367,8 +371,19 @@ func textCell(f Field) string {
 			return ""
 		}
 	}
-	return fmt.Sprintf("%v", f.Raw)
+	// The same encoding the envelope would give it. %v prints Go syntax —
+	// map[id:x name:] for a composite, exponent notation for a position past a
+	// million — which is neither readable nor anything the caller can hand back
+	// to a flag.
+	if encoded, err := json.Marshal(f.Raw); err == nil {
+		return singleLine(string(encoded))
+	}
+	return singleLine(fmt.Sprintf("%v", f.Raw))
 }
+
+// singleLine collapses whitespace, so one entity stays one line however the
+// value reached the renderer.
+func singleLine(s string) string { return strings.Join(strings.Fields(s), " ") }
 
 // renderableType is the reflect handle for the Renderable interface.
 var renderableType = reflect.TypeOf((*Renderable)(nil)).Elem()

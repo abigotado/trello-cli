@@ -12,6 +12,7 @@ import (
 	"runtime/debug"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/abigotado/trello-cli/internal/auth"
@@ -1144,19 +1145,30 @@ func TestAStaleCachedIDFallsThroughToALiveLookup(t *testing.T) {
 		oldCard  = "000000000000000000000020"
 		newCard  = "000000000000000000000021"
 	)
+	// Addressed directly and never moved, so a failure against it is the board
+	// index's doing and nothing else.
+	const stableCard = "000000000000000000000099"
 	tests := []struct {
 		name string
 		args []string
+		// wantOut is asserted on the second run for a command that fails
+		// quietly rather than by exit code.
+		wantOut string
 	}{
-		{"boards get", []string{"boards", "get", "--board", "Roadmap"}},
-		{"lists list", []string{"lists", "list", "--board", "Roadmap"}},
-		{"cards list", []string{"cards", "list", "--board", "Roadmap"}},
-		{"labels list", []string{"labels", "list", "--board", "Roadmap"}},
-		{"members list", []string{"members", "list", "--board", "Roadmap"}},
-		{"activity list", []string{"activity", "list", "--board", "Roadmap"}},
-		{"comments list", []string{"comments", "list", "--board", "Roadmap", "--card", "Ship it"}},
-		{"checklists list", []string{"checklists", "list", "--board", "Roadmap", "--card", "Ship it"}},
-		{"attachments list", []string{"attachments", "list", "--board", "Roadmap", "--card", "Ship it"}},
+		{"boards get", []string{"boards", "get", "--board", "Roadmap"}, ""},
+		{"lists list", []string{"lists", "list", "--board", "Roadmap"}, ""},
+		{"cards list", []string{"cards", "list", "--board", "Roadmap"}, ""},
+		{"labels list", []string{"labels", "list", "--board", "Roadmap"}, ""},
+		{"members list", []string{"members", "list", "--board", "Roadmap"}, ""},
+		{"activity list", []string{"activity", "list", "--board", "Roadmap"}, ""},
+		{"comments list", []string{"comments", "list", "--board", "Roadmap", "--card", "Ship it"}, ""},
+		{"checklists list", []string{"checklists", "list", "--board", "Roadmap", "--card", "Ship it"}, ""},
+		{"attachments list", []string{"attachments", "list", "--board", "Roadmap", "--card", "Ship it"}, ""},
+		// The card is addressed directly, so only the board name is resolved —
+		// and it is resolved for a label rather than for the read itself. A
+		// stale id there does not fail the command, it just quietly returns a
+		// card with no list, which is the harder version of the same bug.
+		{"cards get labelling a card given by id", []string{"cards", "get", "--board", "Roadmap", "--card-id", stableCard}, `"list": "Doing"`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1226,6 +1238,107 @@ func TestAStaleCachedIDFallsThroughToALiveLookup(t *testing.T) {
 			}
 			if servedStale == 0 {
 				t.Fatal("the stale id was never requested; this run did not exercise the rail")
+			}
+			// Some commands answer a stale id with a missing field rather than
+			// an error, so exit 0 alone does not prove the rail engaged.
+			if tt.wantOut != "" && !strings.Contains(h.out(), tt.wantOut) {
+				t.Errorf("output is missing %s, so the stale index was never refreshed:\n%s", tt.wantOut, h.out())
+			}
+		})
+	}
+}
+
+// A name that matched nothing is a definitive answer, not a stale id. The
+// resolver only says so after listing the live objects, so the id it looked
+// within was good — refreshing that index repeats a question already answered
+// and throws away a correct cache.
+func TestAMissingNameDoesNotRefreshAGoodIndex(t *testing.T) {
+	const boardIndex = "/members/me/boards"
+	// A cache miss is never authoritative, so the resolver goes live once to be
+	// sure the name really is absent. That request is the answer. Anything past
+	// it is the miss being mistaken for a stale id.
+	tests := []struct {
+		name string
+		args []string
+		want map[string]int
+	}{
+		{
+			"card name",
+			[]string{"comments", "list", "--board", "Roadmap", "--card", "Nope"},
+			map[string]int{boardIndex: 0, "/boards/000000000000000000000001/cards": 1},
+		},
+		{
+			"card name under an explicit board id",
+			[]string{"comments", "list", "--board-id", "000000000000000000000001", "--card", "Nope"},
+			map[string]int{boardIndex: 0, "/boards/000000000000000000000001/cards": 1},
+		},
+		{
+			// Two reads of /lists are expected and unrelated to the rail: the
+			// listing labels its cards, and the resolver checks the name live.
+			"list name",
+			[]string{"cards", "list", "--board", "Roadmap", "--list", "Nope"},
+			map[string]int{boardIndex: 0, "/boards/000000000000000000000001/lists": 2},
+		},
+		{
+			"board name",
+			[]string{"lists", "list", "--board", "Nope"},
+			map[string]int{boardIndex: 1},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var mu sync.Mutex
+			warm := false
+			counts := map[string]int{}
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				if warm {
+					counts[r.URL.Path]++
+				}
+				mu.Unlock()
+				switch {
+				case r.URL.Path == "/members/me/boards":
+					_, _ = w.Write([]byte(`[{"id":"000000000000000000000001","name":"Roadmap","shortLink":"aaaaaaaa"}]`))
+				case strings.HasSuffix(r.URL.Path, "/cards"):
+					_, _ = w.Write([]byte(`[{"id":"000000000000000000000020","name":"Ship it","shortLink":"dddddddd","idList":"000000000000000000000010"}]`))
+				case strings.HasSuffix(r.URL.Path, "/lists"):
+					_, _ = w.Write([]byte(`[{"id":"000000000000000000000010","name":"Doing"}]`))
+				default:
+					_, _ = w.Write([]byte(`[]`))
+				}
+			}))
+			defer srv.Close()
+
+			h := readHarness(t, srv)
+			// Warm every index the command will read — boards, that board's
+			// lists, and its cards — so what follows measures the miss and not
+			// the priming.
+			for _, prime := range [][]string{
+				{"cards", "list", "--board", "Roadmap", "--list", "Doing"},
+				{"comments", "list", "--board", "Roadmap", "--card", "Ship it"},
+			} {
+				if got := h.run(prime...); got != errx.CodeOK {
+					t.Fatalf("priming %v: exit code = %d\n%s", prime, got, h.err())
+				}
+			}
+			mu.Lock()
+			warm = true
+			mu.Unlock()
+
+			if got := h.run(tt.args...); got != errx.CodeNotFound {
+				t.Fatalf("exit code = %d, want %d (not found)\n%s", got, errx.CodeNotFound, h.out())
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			for path, want := range tt.want {
+				if got := counts[path]; got != want {
+					t.Errorf("%s requested %d times, want %d", path, got, want)
+				}
+			}
+			// The board index in particular must survive. Dropping it makes the
+			// next invocation pay to rebuild something that was never wrong.
+			if counts[boardIndex] > tt.want[boardIndex] {
+				t.Errorf("a missing name cost the board index a refetch")
 			}
 		})
 	}

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 
 	"github.com/abigotado/trello-cli/internal/errx"
 	"github.com/abigotado/trello-cli/internal/resolve"
@@ -154,22 +155,44 @@ func (a *App) card(ctx context.Context, boardID string, ref objectRef) (resolve.
 // each command body because an opt-in safety rail is the same defect class as
 // a hand-built command that skips the confirmation gate — it works until the
 // one place someone forgets.
+// invalidate drops every index the resolution actually read, and only those.
 func (a *App) verify(
 	ctx context.Context,
-	scope string,
+	invalidate func(),
 	resolveFn func(context.Context) (resolve.Object, error),
 	use func(context.Context, resolve.Object) error,
 ) error {
+	// A resolution can fail because an id it was handed was rejected, which is
+	// the stale-index case and worth another go, or because a name matched
+	// nothing, which is not.
 	obj, err := resolveFn(ctx)
-	if err != nil {
+	if err != nil && !staleID(err) {
 		return err
 	}
-	if useErr := use(ctx, obj); useErr == nil || errx.ExitCode(useErr) != errx.CodeNotFound {
-		return useErr
+	if err == nil {
+		useErr := use(ctx, obj)
+		if useErr == nil || !staleID(useErr) {
+			return useErr
+		}
 	}
-	a.invalidate(scope)
+	invalidate()
 	if obj, err = resolveFn(ctx); err != nil {
 		return err
 	}
 	return use(ctx, obj)
+}
+
+// staleID reports whether err is an id being rejected rather than a name
+// failing to match.
+//
+// Both are exit 3 and they mean opposite things. The client raises NOT_FOUND
+// when Trello rejects an id it was handed, which is exactly what a stale index
+// looks like. The resolver raises NOT_FOUND_<KIND> only after listing the live
+// objects and finding none that match, so the id it looked within was good and
+// the name simply is not there. Retrying that second case refreshes an index
+// that was already correct, costs a round trip, and throws away a good answer
+// to ask the same question twice.
+func staleID(err error) bool {
+	var typed *errx.Error
+	return errors.As(err, &typed) && typed.Reason == "NOT_FOUND"
 }

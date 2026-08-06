@@ -170,7 +170,8 @@ func (a *App) newCardsCommand() *cobra.Command {
 			}
 			// The list index is its own scope, and a stale id in it fails the
 			// same way a stale board id does.
-			return a.verify(ctx, resolve.ListScope(board.ID),
+			return a.verify(ctx,
+				func() { a.invalidate(resolve.ListScope(board.ID)) },
 				func(ctx context.Context) (resolve.Object, error) { return a.list(ctx, board.ID, listRef) },
 				func(ctx context.Context, target resolve.Object) error {
 					cards, err = client.CardsInList(ctx, target.ID, includeClosed)
@@ -216,11 +217,20 @@ func (a *App) newCardsCommand() *cobra.Command {
 		// and failing the whole read because it could not be fetched would be
 		// worse than omitting it.
 		if !getBoardRef.empty() {
-			if board, boardErr := a.board(ctx, getBoardRef); boardErr == nil {
-				if names, nameErr := a.listNames(ctx, board.ID); nameErr == nil {
-					view.listName = names[card.IDList]
+			// On the rail like every other resolution: a stale board id here
+			// does not fail the command, it just silently leaves the list
+			// unlabelled, which is the harder version of the same bug. Errors
+			// stay ignored deliberately — the label is a convenience, and
+			// failing the whole read because it could not be fetched would be
+			// worse than omitting it.
+			_ = a.onBoard(ctx, getBoardRef, func(ctx context.Context, board resolve.Object) error {
+				names, nameErr := a.listNames(ctx, board.ID)
+				if nameErr != nil {
+					return nameErr
 				}
-			}
+				view.listName = names[card.IDList]
+				return nil
+			})
 		}
 		return a.out.Success(view)
 	})
@@ -569,7 +579,13 @@ func (a *App) cardAnywhere(ctx context.Context, boardRef, cardRef objectRef) (re
 // has to remember to opt into works until the one place someone forgets, and
 // the failure there is a not-found for a name that resolves perfectly well.
 func (a *App) onBoard(ctx context.Context, ref objectRef, use func(context.Context, resolve.Object) error) error {
-	return a.verify(ctx, resolve.BoardScope(),
+	// An explicit --board-id came out of no index, so nothing about it can be
+	// stale and there is nothing a refresh would fix.
+	if ref.id != "" {
+		return use(ctx, resolve.Object{ID: ref.id})
+	}
+	return a.verify(ctx,
+		func() { a.invalidate(resolve.BoardScope()) },
 		func(ctx context.Context) (resolve.Object, error) { return a.board(ctx, ref) },
 		use)
 }
@@ -577,10 +593,10 @@ func (a *App) onBoard(ctx context.Context, ref objectRef, use func(context.Conte
 // onCard is the same rail for a card.
 //
 // Two indexes sit on the path to a card named by name: the board it is looked
-// up within, and that board's card index. Either can hold a dead id, so the
-// rails nest and whichever one actually went bad is the one refreshed. Wrapping
-// only the card index leaves a stale board id surfacing as a not-found for a
-// card that resolves fine.
+// up within, and that board's card index. Either can hold a dead id, so one
+// rail covers the whole resolution and drops both. Nesting a rail per index
+// instead makes the outer one read the inner one's failure as its own id going
+// stale, and a mistyped card name then costs a board refetch it cannot help.
 func (a *App) onCard(ctx context.Context, boardRef, cardRef objectRef, use func(context.Context, resolve.Object) error) error {
 	// A card named by id or shortLink came out of no index at all, so there is
 	// nothing that can be stale and use runs once.
@@ -593,11 +609,28 @@ func (a *App) onCard(ctx context.Context, boardRef, cardRef objectRef, use func(
 	if resolve.LooksLikeID(cardRef.name) {
 		return use(ctx, resolve.Object{ID: cardRef.name})
 	}
-	return a.onBoard(ctx, boardRef, func(ctx context.Context, board resolve.Object) error {
-		return a.verify(ctx, resolve.CardScope(board.ID),
-			func(ctx context.Context) (resolve.Object, error) { return a.card(ctx, board.ID, cardRef) },
-			use)
-	})
+	var boardID string
+	return a.verify(ctx,
+		func() {
+			// Only what was actually read from an index. An explicit
+			// --board-id was not, and dropping that scope would cost the next
+			// invocation a refetch to fix something that was never wrong.
+			if boardRef.id == "" {
+				a.invalidate(resolve.BoardScope())
+			}
+			if boardID != "" {
+				a.invalidate(resolve.CardScope(boardID))
+			}
+		},
+		func(ctx context.Context) (resolve.Object, error) {
+			board, err := a.board(ctx, boardRef)
+			if err != nil {
+				return resolve.Object{}, err
+			}
+			boardID = board.ID
+			return a.card(ctx, board.ID, cardRef)
+		},
+		use)
 }
 
 // listNames maps list ids to names for labelling a card listing.
