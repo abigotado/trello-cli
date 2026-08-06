@@ -4,6 +4,17 @@ on:
   push:
     tags:
       - "v*"
+  # Pushing the tag is the normal trigger, and it depends on a webhook being
+  # delivered. When delivery is throttled or dropped the release never runs and
+  # there is nothing to re-run, because no run was ever created — the only way
+  # back in was to delete the tag and push it again and hope. This is the way
+  # back in that does not touch the tag: name one that already exists.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to release, e.g. v0.1.6"
+        required: true
+        type: string
 
 # The repository default for GITHUB_TOKEN is read-only, so the release job must
 # opt in. contents: write is the whole requirement — it covers creating the
@@ -11,6 +22,12 @@ on:
 # to none, which is what we want: no packages, no id-token, no discussions.
 permissions:
   contents: read
+
+# The tag being released, whichever way the run started. On a tag push
+# github.ref_name is that tag; on a manual run inputs.tag is the one named, and
+# github.ref_name would be whatever ref the run was started from instead.
+env:
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
   release:
@@ -25,6 +42,24 @@ jobs:
         uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          ref: ${{ env.RELEASE_TAG }}
+
+      # A manual run can be pointed at any ref the picker offers, a branch
+      # included, and goreleaser would then build and publish a version that
+      # does not exist. Proving HEAD is exactly the named tag costs one command
+      # and is the only thing standing between a typo and an immutable release.
+      - name: Assert the checkout is that tag
+        run: |
+          set -euo pipefail
+          # Swallowed on purpose: describe exits non-zero when HEAD carries no
+          # tag at all, which is a case this check exists to report in its own
+          # words rather than as a bare git fatal.
+          got=$(git describe --exact-match --tags HEAD 2>/dev/null || true)
+          if [ "$got" != "${RELEASE_TAG}" ]; then
+            echo "::error::HEAD is at '${got:-no tag}', expected '${RELEASE_TAG}'"
+            exit 1
+          fi
+          echo "releasing $got"
 
       - name: Set up Go
         uses: actions/setup-go@v7
@@ -49,8 +84,8 @@ jobs:
           set -euo pipefail
           go build -o "${RUNNER_TEMP}/trello-cli" ./cmd/trello-cli
           got=$("${RUNNER_TEMP}/trello-cli" version -o json | jq -r '.data.version')
-          if [ "$got" != "${GITHUB_REF_NAME}" ]; then
-            echo "::error::binary reports version '$got', expected '${GITHUB_REF_NAME}'"
+          if [ "$got" != "${RELEASE_TAG}" ]; then
+            echo "::error::binary reports version '$got', expected '${RELEASE_TAG}'"
             exit 1
           fi
           echo "version stamp ok: $got"
