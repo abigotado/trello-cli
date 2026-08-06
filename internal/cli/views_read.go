@@ -112,6 +112,23 @@ func (c commentView) Fields() []output.Field {
 	}
 }
 
+// activityView renders one board-activity action: a card creation or a
+// list-to-list move.
+type activityView struct{ trello.Activity }
+
+func (a activityView) Fields() []output.Field {
+	card := map[string]string{"id": a.CardID, "name": a.CardName, "shortLink": a.CardShortLink}
+	return []output.Field{
+		{Name: "id", Value: a.ID, Raw: a.ID},
+		{Name: "type", Value: a.Type, Raw: a.Type},
+		{Name: "date", Value: a.Date, Raw: a.Date},
+		{Name: "member", Value: "@" + a.Member, Raw: a.Member},
+		{Name: "card", Value: a.CardName, Raw: card},
+		{Name: "listBefore", Value: a.ListBefore, Raw: a.ListBefore},
+		{Name: "listAfter", Value: a.ListAfter, Raw: a.ListAfter},
+	}
+}
+
 type checklistView struct{ trello.Checklist }
 
 func (c checklistView) Fields() []output.Field {
