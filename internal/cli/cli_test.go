@@ -1133,6 +1133,104 @@ func TestActivityListWithNoResultsCarriesZeroMeta(t *testing.T) {
 	}
 }
 
+// A cached name→id mapping must never be authoritative. When the id it holds
+// has been deleted or renamed away server-side, the command has to refresh the
+// index and retry rather than reporting not-found for a name that resolves
+// perfectly well on a live lookup.
+func TestAStaleCachedIDFallsThroughToALiveLookup(t *testing.T) {
+	const (
+		oldBoard = "000000000000000000000001"
+		newBoard = "000000000000000000000002"
+		oldCard  = "000000000000000000000020"
+		newCard  = "000000000000000000000021"
+	)
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{"boards get", []string{"boards", "get", "--board", "Roadmap"}},
+		{"lists list", []string{"lists", "list", "--board", "Roadmap"}},
+		{"cards list", []string{"cards", "list", "--board", "Roadmap"}},
+		{"labels list", []string{"labels", "list", "--board", "Roadmap"}},
+		{"members list", []string{"members", "list", "--board", "Roadmap"}},
+		{"activity list", []string{"activity", "list", "--board", "Roadmap"}},
+		{"comments list", []string{"comments", "list", "--board", "Roadmap", "--card", "Ship it"}},
+		{"checklists list", []string{"checklists", "list", "--board", "Roadmap", "--card", "Ship it"}},
+		{"attachments list", []string{"attachments", "list", "--board", "Roadmap", "--card", "Ship it"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Flipped between the two runs: the ids the index learned first are
+			// gone, and the same names now resolve to different ones.
+			var moved bool
+			var servedStale int
+
+			board := func() string {
+				if moved {
+					return newBoard
+				}
+				return oldBoard
+			}
+			card := func() string {
+				if moved {
+					return newCard
+				}
+				return oldCard
+			}
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.URL.Path == "/members/me/boards":
+					fmt.Fprintf(w, `[{"id":%q,"name":"Roadmap","shortLink":"aaaaaaaa"}]`, board())
+				// Anything addressed at an id the index learned before the flip
+				// is gone. Serving it would let a stale hit look like a success.
+				case moved && strings.Contains(r.URL.Path, oldBoard),
+					moved && strings.Contains(r.URL.Path, oldCard):
+					servedStale++
+					w.WriteHeader(http.StatusNotFound)
+					_, _ = w.Write([]byte(`{"error":"NOT_FOUND","message":"gone"}`))
+				case strings.HasSuffix(r.URL.Path, "/cards"):
+					fmt.Fprintf(w, `[{"id":%q,"name":"Ship it","shortLink":"dddddddd","idList":"000000000000000000000010"}]`, card())
+				case strings.HasSuffix(r.URL.Path, "/lists"):
+					_, _ = w.Write([]byte(`[{"id":"000000000000000000000010","name":"Doing"}]`))
+				// Every collection route answers with an array. The single-object
+				// routes below must come last, or a /labels request is served a
+				// board and fails to decode.
+				case strings.HasSuffix(r.URL.Path, "/actions"),
+					strings.HasSuffix(r.URL.Path, "/labels"),
+					strings.HasSuffix(r.URL.Path, "/members"),
+					strings.HasSuffix(r.URL.Path, "/checklists"),
+					strings.HasSuffix(r.URL.Path, "/attachments"):
+					_, _ = w.Write([]byte(`[]`))
+				case strings.HasPrefix(r.URL.Path, "/cards/"):
+					fmt.Fprintf(w, `{"id":%q,"name":"Ship it","shortLink":"dddddddd","idList":"000000000000000000000010"}`, card())
+				case strings.HasPrefix(r.URL.Path, "/boards/"):
+					fmt.Fprintf(w, `{"id":%q,"name":"Roadmap","shortLink":"aaaaaaaa"}`, board())
+				default:
+					_, _ = w.Write([]byte(`[]`))
+				}
+			}))
+			defer srv.Close()
+
+			h := readHarness(t, srv)
+
+			// First run teaches the index the pre-flip ids.
+			if got := h.run(tt.args...); got != errx.CodeOK {
+				t.Fatalf("priming run: exit code = %d, want 0\n%s", got, h.err())
+			}
+			moved = true
+
+			// Second run resolves from that index, hits the 404, and must
+			// refresh rather than surface it.
+			if got := h.run(tt.args...); got != errx.CodeOK {
+				t.Fatalf("exit code = %d, want 0 after the cached id went stale\n%s\n%s", got, h.out(), h.err())
+			}
+			if servedStale == 0 {
+				t.Fatal("the stale id was never requested; this run did not exercise the rail")
+			}
+		})
+	}
+}
+
 // writeStub extends the read stub with the mutation routes, and records every
 // non-GET request so a test can prove a dry run sent none.
 type writeStub struct {

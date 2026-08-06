@@ -83,13 +83,11 @@ func (a *App) newBoardsCommand() *cobra.Command {
 			return err
 		}
 		var board trello.Board
-		if err := a.verify(ctx, resolve.BoardScope(),
-			func(ctx context.Context) (resolve.Object, error) { return a.board(ctx, ref) },
-			func(ctx context.Context, obj resolve.Object) error {
-				var getErr error
-				board, getErr = client.Board(ctx, obj.ID)
-				return getErr
-			}); err != nil {
+		if err := a.onBoard(ctx, ref, func(ctx context.Context, obj resolve.Object) error {
+			var getErr error
+			board, getErr = client.Board(ctx, obj.ID)
+			return getErr
+		}); err != nil {
 			return err
 		}
 		return a.out.Success(boardView{board})
@@ -115,13 +113,11 @@ func (a *App) newListsCommand() *cobra.Command {
 			return err
 		}
 		var lists []trello.List
-		if err := a.verify(ctx, resolve.BoardScope(),
-			func(ctx context.Context) (resolve.Object, error) { return a.board(ctx, boardRef) },
-			func(ctx context.Context, obj resolve.Object) error {
-				var listErr error
-				lists, listErr = client.Lists(ctx, obj.ID, includeClosed)
-				return listErr
-			}); err != nil {
+		if err := a.onBoard(ctx, boardRef, func(ctx context.Context, obj resolve.Object) error {
+			var listErr error
+			lists, listErr = client.Lists(ctx, obj.ID, includeClosed)
+			return listErr
+		}); err != nil {
 			return err
 		}
 		views := make([]listView, 0, len(lists))
@@ -156,30 +152,31 @@ func (a *App) newCardsCommand() *cobra.Command {
 		if err != nil {
 			return err
 		}
-		board, err := a.board(ctx, listBoardRef)
-		if err != nil {
-			return err
-		}
-		// Fetched once and used to label every card, so a listing does not
-		// force the caller into a second lookup just to read it.
-		names, err := a.listNames(ctx, board.ID)
-		if err != nil {
-			return err
-		}
-
 		var cards []trello.Card
-		// a.list falls back to TRELLO_CLI_LIST, so checking empty() directly
-		// would give one env var two meanings: honoured by cards create and
-		// silently ignored here.
-		if listRef.empty() && a.cfg.DefaultList == "" {
-			cards, err = client.CardsOnBoard(ctx, board.ID, includeClosed)
-		} else {
-			var target resolve.Object
-			if target, err = a.list(ctx, board.ID, listRef); err == nil {
-				cards, err = client.CardsInList(ctx, target.ID, includeClosed)
+		var names map[string]string
+		if err := a.onBoard(ctx, listBoardRef, func(ctx context.Context, board resolve.Object) error {
+			// Fetched once and used to label every card, so a listing does not
+			// force the caller into a second lookup just to read it.
+			var err error
+			if names, err = a.listNames(ctx, board.ID); err != nil {
+				return err
 			}
-		}
-		if err != nil {
+			// a.list falls back to TRELLO_CLI_LIST, so checking empty() directly
+			// would give one env var two meanings: honoured by cards create and
+			// silently ignored here.
+			if listRef.empty() && a.cfg.DefaultList == "" {
+				cards, err = client.CardsOnBoard(ctx, board.ID, includeClosed)
+				return err
+			}
+			// The list index is its own scope, and a stale id in it fails the
+			// same way a stale board id does.
+			return a.verify(ctx, resolve.ListScope(board.ID),
+				func(ctx context.Context) (resolve.Object, error) { return a.list(ctx, board.ID, listRef) },
+				func(ctx context.Context, target resolve.Object) error {
+					cards, err = client.CardsInList(ctx, target.ID, includeClosed)
+					return err
+				})
+		}); err != nil {
 			return err
 		}
 		views := make([]cardView, 0, len(cards))
@@ -202,12 +199,12 @@ func (a *App) newCardsCommand() *cobra.Command {
 		if err != nil {
 			return err
 		}
-		obj, err := a.cardAnywhere(ctx, getBoardRef, cardRef)
-		if err != nil {
-			return err
-		}
-		card, err := client.Card(ctx, obj.ID)
-		if err != nil {
+		var card trello.Card
+		if err := a.onCard(ctx, getBoardRef, cardRef, func(ctx context.Context, obj resolve.Object) error {
+			var getErr error
+			card, getErr = client.Card(ctx, obj.ID)
+			return getErr
+		}); err != nil {
 			return err
 		}
 		view := cardView{Card: card}
@@ -241,12 +238,12 @@ func (a *App) newLabelsCommand() *cobra.Command {
 		if err != nil {
 			return err
 		}
-		board, err := a.board(ctx, boardRef)
-		if err != nil {
-			return err
-		}
-		labels, err := client.Labels(ctx, board.ID)
-		if err != nil {
+		var labels []trello.Label
+		if err := a.onBoard(ctx, boardRef, func(ctx context.Context, obj resolve.Object) error {
+			var labelErr error
+			labels, labelErr = client.Labels(ctx, obj.ID)
+			return labelErr
+		}); err != nil {
 			return err
 		}
 		views := make([]labelView, 0, len(labels))
@@ -268,12 +265,12 @@ func (a *App) newMembersCommand() *cobra.Command {
 		if err != nil {
 			return err
 		}
-		board, err := a.board(ctx, boardRef)
-		if err != nil {
-			return err
-		}
-		members, err := client.BoardMembers(ctx, board.ID)
-		if err != nil {
+		var members []trello.Member
+		if err := a.onBoard(ctx, boardRef, func(ctx context.Context, obj resolve.Object) error {
+			var memberErr error
+			members, memberErr = client.BoardMembers(ctx, obj.ID)
+			return memberErr
+		}); err != nil {
 			return err
 		}
 		views := make([]memberListView, 0, len(members))
@@ -306,12 +303,12 @@ func (a *App) newCommentsCommand() *cobra.Command {
 		if err != nil {
 			return err
 		}
-		obj, err := a.cardAnywhere(ctx, boardRef, cardRef)
-		if err != nil {
-			return err
-		}
-		comments, err := client.Comments(ctx, obj.ID, trello.Page{Limit: limit, Before: before})
-		if err != nil {
+		var comments []trello.Comment
+		if err := a.onCard(ctx, boardRef, cardRef, func(ctx context.Context, obj resolve.Object) error {
+			var commentErr error
+			comments, commentErr = client.Comments(ctx, obj.ID, trello.Page{Limit: limit, Before: before})
+			return commentErr
+		}); err != nil {
 			return err
 		}
 		views := make([]commentView, 0, len(comments))
@@ -362,12 +359,12 @@ func (a *App) newActivityCommand() *cobra.Command {
 		if err != nil {
 			return err
 		}
-		board, err := a.board(ctx, boardRef)
-		if err != nil {
-			return err
-		}
-		items, err := client.Activity(ctx, board.ID, filter, trello.Page{Limit: limit, Since: since, Before: before})
-		if err != nil {
+		var items []trello.Activity
+		if err := a.onBoard(ctx, boardRef, func(ctx context.Context, obj resolve.Object) error {
+			var actErr error
+			items, actErr = client.Activity(ctx, obj.ID, filter, trello.Page{Limit: limit, Since: since, Before: before})
+			return actErr
+		}); err != nil {
 			return err
 		}
 		views := make([]activityView, 0, len(items))
@@ -409,12 +406,12 @@ func (a *App) newChecklistsCommand() *cobra.Command {
 		if err != nil {
 			return err
 		}
-		obj, err := a.cardAnywhere(ctx, boardRef, cardRef)
-		if err != nil {
-			return err
-		}
-		lists, err := client.Checklists(ctx, obj.ID)
-		if err != nil {
+		var lists []trello.Checklist
+		if err := a.onCard(ctx, boardRef, cardRef, func(ctx context.Context, obj resolve.Object) error {
+			var listErr error
+			lists, listErr = client.Checklists(ctx, obj.ID)
+			return listErr
+		}); err != nil {
 			return err
 		}
 		views := make([]checklistView, 0, len(lists))
@@ -437,12 +434,12 @@ func (a *App) newAttachmentsCommand() *cobra.Command {
 		if err != nil {
 			return err
 		}
-		obj, err := a.cardAnywhere(ctx, boardRef, cardRef)
-		if err != nil {
-			return err
-		}
-		items, err := client.Attachments(ctx, obj.ID)
-		if err != nil {
+		var items []trello.Attachment
+		if err := a.onCard(ctx, boardRef, cardRef, func(ctx context.Context, obj resolve.Object) error {
+			var attErr error
+			items, attErr = client.Attachments(ctx, obj.ID)
+			return attErr
+		}); err != nil {
 			return err
 		}
 		views := make([]attachmentView, 0, len(items))
@@ -562,6 +559,45 @@ func (a *App) cardAnywhere(ctx context.Context, boardRef, cardRef objectRef) (re
 		return resolve.Object{}, err
 	}
 	return a.card(ctx, board.ID, cardRef)
+}
+
+// onBoard runs use against the board a command names, refreshing the board
+// index once and retrying if the id it resolved turns out to be gone.
+//
+// Every read that resolves a board goes through this rather than calling
+// a.board directly. verify's own comment says why: a rail each command body
+// has to remember to opt into works until the one place someone forgets, and
+// the failure there is a not-found for a name that resolves perfectly well.
+func (a *App) onBoard(ctx context.Context, ref objectRef, use func(context.Context, resolve.Object) error) error {
+	return a.verify(ctx, resolve.BoardScope(),
+		func(ctx context.Context) (resolve.Object, error) { return a.board(ctx, ref) },
+		use)
+}
+
+// onCard is the same rail for a card.
+//
+// Two indexes sit on the path to a card named by name: the board it is looked
+// up within, and that board's card index. Either can hold a dead id, so the
+// rails nest and whichever one actually went bad is the one refreshed. Wrapping
+// only the card index leaves a stale board id surfacing as a not-found for a
+// card that resolves fine.
+func (a *App) onCard(ctx context.Context, boardRef, cardRef objectRef, use func(context.Context, resolve.Object) error) error {
+	// A card named by id or shortLink came out of no index at all, so there is
+	// nothing that can be stale and use runs once.
+	if cardRef.id != "" {
+		return use(ctx, resolve.Object{ID: cardRef.id})
+	}
+	if cardRef.name == "" {
+		return errx.Usage("a card is required: pass --card or --card-id")
+	}
+	if resolve.LooksLikeID(cardRef.name) {
+		return use(ctx, resolve.Object{ID: cardRef.name})
+	}
+	return a.onBoard(ctx, boardRef, func(ctx context.Context, board resolve.Object) error {
+		return a.verify(ctx, resolve.CardScope(board.ID),
+			func(ctx context.Context) (resolve.Object, error) { return a.card(ctx, board.ID, cardRef) },
+			use)
+	})
 }
 
 // listNames maps list ids to names for labelling a card listing.

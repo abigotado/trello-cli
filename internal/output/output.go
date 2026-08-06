@@ -311,7 +311,16 @@ func (w *Writer) renderText(data any) error {
 		}
 		parts := make([]string, 0, len(fields))
 		for _, f := range fields {
-			// Empty values are dropped rather than padded. Trello leaves most
+			// A caller that named its columns gets exactly those columns, in
+			// that order, on every row. Dropping one because it happens to be
+			// empty slides the rest left and changes what column N means from
+			// row to row, which is the whole reason someone projects in the
+			// first place.
+			if len(w.Fields) > 0 {
+				parts = append(parts, textCell(f))
+				continue
+			}
+			// In the default listing the opposite is right. Trello leaves most
 			// optional fields blank, so keeping them would end every line in a
 			// run of separators and bury the values that are actually set.
 			if f.Value == "" {
@@ -324,6 +333,35 @@ func (w *Writer) renderText(data any) error {
 		}
 	}
 	return nil
+}
+
+// textCell is what one field contributes to an explicitly projected text row.
+//
+// Value is written for a human and wins whenever it is set. Some fields
+// deliberately have none — pos and dueComplete carry a number and a boolean,
+// changed is folded into the type, members is a list of ids — because none of
+// them belong in a default line. Asking for one by name is the caller saying
+// they do want it, and answering that with a blank column would make --fields
+// unusable for exactly the fields it exists to reach.
+func textCell(f Field) string {
+	if f.Value != "" {
+		return f.Value
+	}
+	if f.Raw == nil {
+		return ""
+	}
+	if s, ok := f.Raw.(string); ok {
+		return s
+	}
+	// A typed nil — the card of an action that has none — is not == nil, and
+	// would otherwise print as "map[]".
+	switch v := reflect.ValueOf(f.Raw); v.Kind() {
+	case reflect.Map, reflect.Slice, reflect.Pointer, reflect.Interface:
+		if v.IsNil() {
+			return ""
+		}
+	}
+	return fmt.Sprintf("%v", f.Raw)
 }
 
 // renderableType is the reflect handle for the Renderable interface.
