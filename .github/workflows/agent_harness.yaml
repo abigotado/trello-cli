@@ -23,7 +23,8 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v7
         with:
-          # tomllib requires 3.11+.
+          # Pinned so a runner image bump cannot silently change the interpreter
+          # the harness scripts run on.
           python-version: "3.12"
 
       - name: Generated mirrors must stay untracked

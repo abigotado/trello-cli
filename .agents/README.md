@@ -44,8 +44,9 @@ python3 -m unittest discover -s .agents/tests -p 'test_*.py'
 ```
 
 `sync-rules.py` defaults its repository root from its own location, so it takes
-no arguments. `tomllib` requires Python 3.11+; set `AGENT_HARNESS_PYTHON` if the
-first `python3` on PATH is older.
+no arguments. Both scripts need the standard library only; set
+`AGENT_HARNESS_PYTHON` when the first `python3` on PATH is not the interpreter
+the hooks should use.
 
 ## Why the compiler is not vendored, but the rule sync is
 
