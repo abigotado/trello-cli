@@ -1,0 +1,4 @@
+# Every pull request requests a review from the maintainer automatically.
+# Paired with the required-review rule on main, this is what stops a change
+# reaching main without a second pair of eyes.
+* @abigotado

@@ -1,0 +1,11 @@
+# A blank issue has no version, no exit code, and no command — the three things
+# every bug report here needs. The forms are cheap; keep them mandatory.
+blank_issues_enabled: false
+
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/abigotado/trello-cli/security/advisories/new
+    about: Report privately. This binary holds live Trello credentials — never in a public issue.
+  - name: Command and contract reference
+    url: https://github.com/abigotado/trello-cli/blob/main/docs/commands.md
+    about: Every command, flag, exit code, and envelope field, generated from the binary.

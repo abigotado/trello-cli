@@ -176,8 +176,10 @@ Drop `--dry-run` to apply it.
 - [`docs/contract.md`](docs/contract.md) — the envelope and the exit-code table.
   Generated from the binary.
 - `trello-cli <command> --help` for the same, at the terminal.
-- [`AGENTS.md`](AGENTS.md) — contributor entry point: rules, workflow, and the
-  validation gate.
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — how to build, test, and send a change:
+  the validation gate, the generated files, and what counts as a contract break.
+- [`AGENTS.md`](AGENTS.md) — the rule router the scoped working rules hang off.
+- [`SECURITY.md`](SECURITY.md) — how to report a vulnerability privately.
 
 Environment: `TRELLO_CLI_BOARD` and `TRELLO_CLI_LIST` supply defaults for
 `--board` and `--list`; `TRELLO_CLI_READONLY` disables every write to Trello —
