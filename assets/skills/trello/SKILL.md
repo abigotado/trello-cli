@@ -24,11 +24,15 @@ appears only for collections. `meta.truncated` true means the page came back
 exactly as long as `--limit`, which is the only signal Trello gives that more
 *may* exist — it is not a promise that it does.
 
-What to do about it depends on the command, and only two take a `--limit` at
-all. `comments list` pages properly: pass `--before` with the oldest id you got.
-`search` does not page — the only way to see more is to re-run it with a larger
-`--limit`. Every other list command returns everything and never reports
-`truncated` true.
+What to do about it depends on the command, and only three take a `--limit` at
+all. `comments list` and `activity list` page properly: both default to 50 and
+report `truncated` true when the page came back full, so walk backwards with
+`--before`, carrying the oldest id you got, until a page reports false. On
+`activity list` do not reach for `--since` instead — the feed is newest-first
+and `--limit` cuts from the old end, so `--since` sets a floor and still hands
+you the newest page of a wider window. `search` does not page — the only way to
+see more is to re-run it with a larger `--limit`. Every other list command
+returns everything and never reports `truncated` true.
 
 ## Exit codes
 

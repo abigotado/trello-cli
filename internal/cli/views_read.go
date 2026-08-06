@@ -95,7 +95,7 @@ type memberListView struct{ trello.Member }
 func (m memberListView) Fields() []output.Field {
 	return []output.Field{
 		{Name: "id", Value: m.ID, Raw: m.ID},
-		{Name: "username", Value: "@" + m.Username, Raw: m.Username},
+		{Name: "username", Value: at(m.Username), Raw: m.Username},
 		{Name: "fullName", Value: m.FullName, Raw: m.FullName},
 	}
 }
@@ -106,7 +106,7 @@ func (c commentView) Fields() []output.Field {
 	return []output.Field{
 		{Name: "id", Value: c.ID, Raw: c.ID},
 		{Name: "date", Value: c.Date, Raw: c.Date},
-		{Name: "author", Value: "@" + c.Author, Raw: c.Author},
+		{Name: "author", Value: at(c.Author), Raw: c.Author},
 		// Newlines would break the one-line-per-entity contract of text output.
 		{Name: "text", Value: oneLine(c.Text), Raw: c.Text},
 	}
@@ -117,15 +117,33 @@ func (c commentView) Fields() []output.Field {
 type activityView struct{ trello.Activity }
 
 func (a activityView) Fields() []output.Field {
-	card := map[string]string{"id": a.CardID, "name": a.CardName, "shortLink": a.CardShortLink}
+	// A nil map renders as null rather than as three empty strings. An action
+	// that names no card — reachable through --type, which takes any Trello
+	// action type — would otherwise hand the caller a truthy object whose id is
+	// blank.
+	var card map[string]string
+	if a.CardID != "" {
+		card = map[string]string{"id": a.CardID, "name": a.CardName, "shortLink": a.CardShortLink}
+	}
+	// listBefore is empty on every creation, and text output drops empty values
+	// rather than padding them, so the destination list would land in the column
+	// the source list occupies one row up. The arrow makes the value say which
+	// one it is; raw output keeps the bare list name.
+	listAfter := a.ListAfter
+	if listAfter != "" {
+		listAfter = "-> " + listAfter
+	}
 	return []output.Field{
 		{Name: "id", Value: a.ID, Raw: a.ID},
 		{Name: "type", Value: a.Type, Raw: a.Type},
+		{Name: "changed", Value: a.Changed, Raw: a.Changed},
 		{Name: "date", Value: a.Date, Raw: a.Date},
-		{Name: "member", Value: "@" + a.Member, Raw: a.Member},
-		{Name: "card", Value: a.CardName, Raw: card},
+		// Butler and other app-created actions carry no member, and a bare "@"
+		// is not a username.
+		{Name: "member", Value: at(a.Member), Raw: a.Member},
+		{Name: "card", Value: oneLine(a.CardName), Raw: card},
 		{Name: "listBefore", Value: a.ListBefore, Raw: a.ListBefore},
-		{Name: "listAfter", Value: a.ListAfter, Raw: a.ListAfter},
+		{Name: "listAfter", Value: listAfter, Raw: a.ListAfter},
 	}
 }
 
@@ -186,6 +204,16 @@ func (s searchHitView) Fields() []output.Field {
 		{Name: "name", Value: s.Name, Raw: s.Name},
 		{Name: "url", Value: s.URL, Raw: s.URL},
 	}
+}
+
+// at prefixes a username with the sigil that marks it as one, and renders
+// nothing at all when there is no username. Text output drops empty values, so
+// returning "" keeps a member-less row from carrying a bare "@".
+func at(username string) string {
+	if username == "" {
+		return ""
+	}
+	return "@" + username
 }
 
 // flag renders a boolean as a label or nothing, so text output stays compact

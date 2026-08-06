@@ -2,7 +2,9 @@ package trello
 
 import (
 	"context"
+	"encoding/json"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -110,6 +112,14 @@ type Activity struct {
 	CardID        string `json:"cardId"`
 	CardName      string `json:"cardName"`
 	CardShortLink string `json:"cardShortLink"`
+	// Changed names the card fields an updateCard action touched, comma
+	// separated and sorted: "idList" for a move, "name" for a rename, "closed"
+	// for an archive. Trello types every one of those as plain "updateCard" and
+	// distinguishes them only by the previous values it echoes back, so without
+	// this a rename and an archive are the same row with both list names blank
+	// — and both are indistinguishable from a move whose list data did not come
+	// through. It is empty for action types that are not an update.
+	Changed string `json:"changed,omitempty"`
 	// ListBefore and ListAfter are set for a move. A creation carries only
 	// ListAfter, the list the card was created into.
 	ListBefore string `json:"listBefore,omitempty"`
@@ -119,6 +129,21 @@ type Activity struct {
 // DefaultActivityFilter is the action-type filter Activity applies when the
 // caller does not name one: card creations and list-to-list moves.
 const DefaultActivityFilter = "createCard,updateCard:idList"
+
+// Bounds for an actions feed.
+//
+// Trello pages actions server-side whether or not the caller asks it to, so a
+// request that sends no limit still comes back cut off — and the caller has no
+// way to tell a full page from a complete history. Sending the limit
+// explicitly is what makes len(items) == limit a usable truncation signal.
+const (
+	// DefaultActionsPageSize mirrors Trello's own server-side default, so
+	// naming it explicitly bounds the request without changing what comes back.
+	DefaultActionsPageSize = 50
+	// MaxActionsPerPage is Trello's hard cap for a single actions call. Asking
+	// for more returns this many, which would read as an unfilled page.
+	MaxActionsPerPage = 1000
+)
 
 // activityAction is the wire shape for a createCard or updateCard action.
 type activityAction struct {
@@ -146,7 +171,26 @@ type activityAction struct {
 		ListAfter struct {
 			Name string `json:"name"`
 		} `json:"listAfter"`
+		// Old holds the previous value of every field an update touched. Only
+		// its keys are read — they are the only thing that says which kind of
+		// update this was — so the values stay raw rather than being modeled.
+		Old map[string]json.RawMessage `json:"old"`
 	} `json:"data"`
+}
+
+// changedFields names the fields an update touched, from the previous values
+// Trello echoes back in data.old. Sorted, so an update that touched several
+// fields at once renders the same way every time.
+func changedFields(old map[string]json.RawMessage) string {
+	if len(old) == 0 {
+		return ""
+	}
+	names := make([]string, 0, len(old))
+	for name := range old {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return strings.Join(names, ",")
 }
 
 // Activity returns a board's activity, newest first, bounded by page.
@@ -180,6 +224,7 @@ func (c *Client) Activity(ctx context.Context, boardID, filter string, page Page
 		case "createCard":
 			act.ListAfter = a.Data.List.Name
 		case "updateCard":
+			act.Changed = changedFields(a.Data.Old)
 			act.ListBefore = a.Data.ListBefore.Name
 			act.ListAfter = a.Data.ListAfter.Name
 		}
