@@ -29,6 +29,14 @@ func (c card) Fields() []Field {
 	}
 }
 
+// sparse is a row whose only field has no human-readable value, the shape the
+// views use for data that belongs in JSON but not in a default text line.
+type sparse struct{ raw any }
+
+func (s sparse) Fields() []Field {
+	return []Field{{Name: "x", Value: "", Raw: s.raw}}
+}
+
 func boolText(b bool) string {
 	if b {
 		return "open"
@@ -341,32 +349,62 @@ func TestTextRendering(t *testing.T) {
 	})
 
 	// A field with no human form is exactly the field someone reaches for by
-	// name. Answering --fields open with a blank line made it unreachable in
-	// text, while JSON reported the value.
+	// name. Answering --fields dueComplete with a blank line made it
+	// unreachable in text while JSON reported the value.
 	t.Run("a value-less field renders its raw when projected by name", func(t *testing.T) {
 		tests := []struct {
-			name  string
-			field Field
-			want  string
+			name string
+			raw  any
+			want string
 		}{
-			{"boolean", Field{Name: "x", Value: "", Raw: true}, "true"},
-			{"number", Field{Name: "x", Value: "", Raw: 1.5}, "1.5"},
-			{"string raw", Field{Name: "x", Value: "", Raw: "idList"}, "idList"},
-			{"slice", Field{Name: "x", Value: "", Raw: []string{"a", "b"}}, "[a b]"},
-			{"nil interface", Field{Name: "x", Value: "", Raw: nil}, ""},
-			{"typed nil map", Field{Name: "x", Value: "", Raw: map[string]string(nil)}, ""},
+			{"boolean", true, "true"},
+			{"number", 1.5, "1.5"},
+			// %v switches to exponent notation past ~1e6, and Trello positions
+			// live well above that. A pos read out of text has to be a value
+			// --pos will take back.
+			{"a position past a million", 1048576.0, "1048576"},
+			{"string raw", "idList", "idList"},
+			{"slice", []string{"a", "b"}, `["a","b"]`},
+			// %v would print Go syntax here: map[id:x name:].
+			{"map", map[string]string{"id": "x"}, `{"id":"x"}`},
+			{"nil interface", nil, ""},
+			{"typed nil map", map[string]string(nil), ""},
 			// Whether a view left a collection nil or built it empty is an
 			// implementation detail; both have to read the same.
-			{"empty slice reads as nil does", Field{Name: "x", Value: "", Raw: []string{}}, ""},
-			{"empty map reads as nil does", Field{Name: "x", Value: "", Raw: map[string]int{}}, ""},
-			{"value wins over raw", Field{Name: "x", Value: "shown", Raw: "hidden"}, "shown"},
+			{"empty slice reads as nil does", []string{}, ""},
+			{"empty map reads as nil does", map[string]int{}, ""},
 		}
 		for _, tt := range tests {
 			t.Run(tt.name, func(t *testing.T) {
-				if got := textCell(tt.field); got != tt.want {
-					t.Errorf("textCell() = %q, want %q", got, tt.want)
+				w, out, _ := newWriter(FormatText, []string{"x"})
+				if err := w.Success(sparse{raw: tt.raw}); err != nil {
+					t.Fatalf("Success() error = %v", err)
+				}
+				if got := strings.TrimRight(out.String(), "\n"); got != tt.want {
+					t.Errorf("rendered %q, want %q", got, tt.want)
 				}
 			})
+		}
+	})
+
+	// The whole point of the text renderer is that a caller can read it a line
+	// at a time. A view collapses whitespace out of the value it formats for
+	// exactly that reason, so the raw fallback has to hold the same line.
+	t.Run("a projected field cannot break one line per entity", func(t *testing.T) {
+		w, out, _ := newWriter(FormatText, []string{"x"})
+		rows := []Renderable{
+			sparse{raw: "first\nsecond\n\nthird"},
+			sparse{raw: "plain"},
+		}
+		if err := w.Success(rows); err != nil {
+			t.Fatalf("Success() error = %v", err)
+		}
+		lines := strings.Split(strings.TrimRight(out.String(), "\n"), "\n")
+		if len(lines) != 2 {
+			t.Fatalf("2 entities rendered as %d lines, want 2:\n%q", len(lines), out.String())
+		}
+		if lines[0] != "first second third" {
+			t.Errorf("line = %q, want the newlines collapsed", lines[0])
 		}
 	})
 }
