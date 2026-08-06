@@ -313,6 +313,58 @@ func TestTextRendering(t *testing.T) {
 			t.Errorf("line contains a run of separators from an empty field: %q", line)
 		}
 	})
+
+	// The opposite rule applies once the caller names its columns. Dropping an
+	// empty one there slides the rest left, so column N stops meaning the same
+	// thing from row to row — the reason someone projects at all.
+	t.Run("an explicitly projected column is kept even when empty", func(t *testing.T) {
+		w, out, _ := newWriter(FormatText, []string{"id", "due", "name"})
+		rows := []Renderable{
+			card{id: "1", name: "A", due: "2026-09-01", open: true},
+			card{id: "2", name: "B", open: true},
+		}
+		if err := w.Success(rows); err != nil {
+			t.Fatalf("Success() error = %v", err)
+		}
+		lines := strings.Split(strings.TrimRight(out.String(), "\n"), "\n")
+		if len(lines) != 2 {
+			t.Fatalf("got %d lines, want 2:\n%s", len(lines), out.String())
+		}
+		for i, line := range lines {
+			if got := len(strings.Split(line, "  ")); got != 3 {
+				t.Errorf("row %d has %d columns, want 3: %q", i, got, line)
+			}
+		}
+		if got := strings.Split(lines[1], "  ")[2]; got != "B" {
+			t.Errorf("name landed in column %q on the row whose due is empty; want it still third", got)
+		}
+	})
+
+	// A field with no human form is exactly the field someone reaches for by
+	// name. Answering --fields open with a blank line made it unreachable in
+	// text, while JSON reported the value.
+	t.Run("a value-less field renders its raw when projected by name", func(t *testing.T) {
+		tests := []struct {
+			name  string
+			field Field
+			want  string
+		}{
+			{"boolean", Field{Name: "x", Value: "", Raw: true}, "true"},
+			{"number", Field{Name: "x", Value: "", Raw: 1.5}, "1.5"},
+			{"string raw", Field{Name: "x", Value: "", Raw: "idList"}, "idList"},
+			{"slice", Field{Name: "x", Value: "", Raw: []string{"a", "b"}}, "[a b]"},
+			{"nil interface", Field{Name: "x", Value: "", Raw: nil}, ""},
+			{"typed nil map", Field{Name: "x", Value: "", Raw: map[string]string(nil)}, ""},
+			{"value wins over raw", Field{Name: "x", Value: "shown", Raw: "hidden"}, "shown"},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				if got := textCell(tt.field); got != tt.want {
+					t.Errorf("textCell() = %q, want %q", got, tt.want)
+				}
+			})
+		}
+	})
 }
 
 func TestParseFormat(t *testing.T) {
