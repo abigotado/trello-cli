@@ -38,13 +38,22 @@ body:
     validations:
       required: true
 
+  - type: input
+    id: exit_code
+    attributes:
+      label: Exit code
+      description: >
+        `echo $?` immediately after the command. It matters as much as the
+        message — the exit code is what a calling agent branches on.
+      placeholder: "4"
+    validations:
+      required: true
+
   - type: textarea
     id: actual
     attributes:
-      label: What happened
-      description: >
-        The full envelope from stdout, plus the exit code (`echo $?`). The exit
-        code matters as much as the message — it is what a calling agent acts on.
+      label: Envelope printed on stdout
+      description: The whole envelope, not an excerpt.
       render: json
     validations:
       required: true
