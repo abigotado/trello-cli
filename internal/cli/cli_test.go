@@ -977,6 +977,17 @@ func TestActivityListTextTellsACreationFromAMove(t *testing.T) {
 	if !strings.Contains(lines[1], "-> Inbox") {
 		t.Errorf("creation line does not mark its list as the destination:\n%s", lines[1])
 	}
+	// The changed fields ride in the type rather than in a column of their own,
+	// which would be empty on the creation and slide its date one place left.
+	if !strings.Contains(lines[0], "updateCard:idList") {
+		t.Errorf("type does not carry the changed field:\n%s", lines[0])
+	}
+	// Same column holds the date on both rows. Splitting on the separator is
+	// the point: it is what a caller reading text output actually does.
+	col := func(line string, n int) string { return strings.Split(line, "  ")[n] }
+	if got0, got1 := col(lines[0], 2), col(lines[1], 2); got0 != "2026-08-06T16:00:00.000Z" || got1 != "2026-08-06T14:00:00.000Z" {
+		t.Errorf("column 3 holds %q on the move and %q on the creation; both must be the date", got0, got1)
+	}
 	// The creation has no memberCreator: Butler and app-created actions carry
 	// none, and "@" on its own is not a username.
 	if strings.Contains(lines[1], "@") {
@@ -994,26 +1005,21 @@ func TestActivityListSurvivesANonJSONErrorBody(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	// A token that cannot occur in the output by coincidence. A one-character
-	// secret makes this assertion pass against a binary that prints the whole
-	// query string, which is the leak it is here to catch.
-	const token = "tok-must-not-appear-anywhere"
 	h := newHarness(t, map[string]string{
 		auth.EnvAPIKey:        "k",
-		auth.EnvToken:         token,
+		auth.EnvToken:         "t",
 		"TRELLO_CLI_BASE_URL": srv.URL,
 	}, nil)
 
 	if got := h.run("activity", "list", "--board-id", "000000000000000000000001"); got != errx.CodeAuth {
 		t.Fatalf("exit code = %d, want %d (auth)\n%s", got, errx.CodeAuth, h.out())
 	}
-	// A wrapped *url.Error carries the full request URL, token and all. Both
-	// streams, because -v output is subject to the same rule.
-	for name, stream := range map[string]string{"stdout": h.out(), "stderr": h.err()} {
-		if strings.Contains(stream, token) {
-			t.Errorf("the token reached %s:\n%s", name, stream)
-		}
-	}
+	// No token assertion here on purpose. This path builds its error from the
+	// response status and body, never from the request URL, so a leak cannot
+	// reach it and a check would pass against a binary that leaks everywhere
+	// else. Redaction is guarded where it actually happens, by
+	// TestNetworkFailureIsRetryableAndRedacted in internal/trello — verified by
+	// defeating redact() and watching that test, and only that test, fail.
 }
 
 // An action that names no card must say so. Building the card object
