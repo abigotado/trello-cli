@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -17,6 +18,7 @@ import (
 	"github.com/abigotado/trello-cli/internal/errx"
 	"github.com/abigotado/trello-cli/internal/resolve"
 	"github.com/abigotado/trello-cli/internal/skills"
+	"github.com/abigotado/trello-cli/internal/trello"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )
@@ -524,6 +526,7 @@ func trelloStub(t *testing.T) *httptest.Server {
 			{"id":"000000000000000000000031","type":"updateCard","date":"2026-08-06T15:50:29.045Z",
 			 "memberCreator":{"username":"nik"},
 			 "data":{"card":{"id":"000000000000000000000020","name":"Ship it","shortLink":"dddddddd"},
+			         "old":{"idList":"000000000000000000000010"},
 			         "listBefore":{"name":"Doing"},"listAfter":{"name":"Done"}}}
 		]`))
 	})
@@ -729,11 +732,12 @@ func TestActivityListReturnsCreatesAndMoves(t *testing.T) {
 // not its full, noisy default action feed. --type must override that
 // verbatim, and --since/--before must reach the request unchanged.
 func TestActivityListFilterAndPaging(t *testing.T) {
-	var gotFilter, gotSince, gotBefore string
+	var gotFilter, gotSince, gotBefore, gotLimit string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotFilter = r.URL.Query().Get("filter")
 		gotSince = r.URL.Query().Get("since")
 		gotBefore = r.URL.Query().Get("before")
+		gotLimit = r.URL.Query().Get("limit")
 		_, _ = w.Write([]byte(`[]`))
 	}))
 	defer srv.Close()
@@ -750,8 +754,13 @@ func TestActivityListFilterAndPaging(t *testing.T) {
 	if gotFilter != "createCard,updateCard:idList" {
 		t.Errorf("default filter = %q, want createCard,updateCard:idList", gotFilter)
 	}
+	// The limit is what makes meta.truncated mean anything. Sending none leaves
+	// Trello applying its own page size, and a short page then looks complete.
+	if gotLimit != strconv.Itoa(trello.DefaultActionsPageSize) {
+		t.Errorf("default limit = %q, want %d sent explicitly", gotLimit, trello.DefaultActionsPageSize)
+	}
 
-	if got := h.run("activity", "list", "--board-id", "000000000000000000000001",
+	if got := h.run("activity", "list", "--board-id", "000000000000000000000001", "--limit", "7",
 		"--type", "commentCard", "--since", "2026-08-03T00:00:00Z", "--before", "act123"); got != errx.CodeOK {
 		t.Fatalf("exit code = %d, want 0\n%s", got, h.err())
 	}
@@ -760,6 +769,235 @@ func TestActivityListFilterAndPaging(t *testing.T) {
 	}
 	if gotSince != "2026-08-03T00:00:00Z" || gotBefore != "act123" {
 		t.Errorf("since = %q, before = %q, want the flag values passed through", gotSince, gotBefore)
+	}
+	if gotLimit != "7" {
+		t.Errorf("--limit reached the request as %q, want 7", gotLimit)
+	}
+}
+
+// A page that came back exactly as long as the limit is the only signal Trello
+// gives that more may exist, and the limit is always sent — so a default
+// invocation against a busy board must not claim it holds the whole history.
+func TestActionsPageReportsTruncationOnAFullPage(t *testing.T) {
+	action := func(id int) string {
+		return fmt.Sprintf(`{"id":"%024d","type":"commentCard","date":"2026-08-06T00:00:00.000Z",
+			"memberCreator":{"username":"nik"},
+			"data":{"card":{"id":"000000000000000000000020","name":"Ship it","shortLink":"dddddddd"},
+			        "text":"note %d","list":{"name":"Doing"}}}`, id, id)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/actions") {
+			limit, err := strconv.Atoi(r.URL.Query().Get("limit"))
+			if err != nil {
+				t.Errorf("actions request carried no usable limit: %q", r.URL.Query().Get("limit"))
+				limit = 1
+			}
+			rows := make([]string, 0, limit)
+			for i := range limit {
+				rows = append(rows, action(i))
+			}
+			_, _ = w.Write([]byte("[" + strings.Join(rows, ",") + "]"))
+			return
+		}
+		_, _ = w.Write([]byte(`{"id":"000000000000000000000020","name":"Ship it","shortLink":"dddddddd"}`))
+	}))
+	defer srv.Close()
+
+	h := newHarness(t, map[string]string{
+		auth.EnvAPIKey:        "k",
+		auth.EnvToken:         "t",
+		"TRELLO_CLI_BASE_URL": srv.URL,
+	}, nil)
+
+	tests := []struct {
+		name string
+		args []string
+		want int
+	}{
+		{"activity list default limit fills the page", []string{"activity", "list", "--board-id", "000000000000000000000001"}, trello.DefaultActionsPageSize},
+		{"activity list explicit limit fills the page", []string{"activity", "list", "--board-id", "000000000000000000000001", "--limit", "3"}, 3},
+		{"comments list default limit fills the page", []string{"comments", "list", "--card-id", "000000000000000000000020"}, trello.DefaultActionsPageSize},
+		{"comments list explicit limit fills the page", []string{"comments", "list", "--card-id", "000000000000000000000020", "--limit", "2"}, 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := h.run(tt.args...); got != errx.CodeOK {
+				t.Fatalf("exit code = %d, want 0\n%s", got, h.err())
+			}
+			var env struct {
+				Meta struct {
+					Count     int  `json:"count"`
+					Truncated bool `json:"truncated"`
+				} `json:"meta"`
+			}
+			if err := json.Unmarshal([]byte(h.out()), &env); err != nil {
+				t.Fatalf("bad envelope: %v\n%s", err, h.out())
+			}
+			if env.Meta.Count != tt.want {
+				t.Fatalf("count = %d, want %d", env.Meta.Count, tt.want)
+			}
+			if !env.Meta.Truncated {
+				t.Error("truncated is false on a page that came back exactly full; the caller is told a partial history is complete")
+			}
+		})
+	}
+}
+
+// A limit an actions feed cannot honor is a usage error, not something to
+// silently drop. Dropping it left Trello applying its own page size while the
+// envelope still reported truncated:false.
+func TestActionLimitOutOfRangeIsAUsageError(t *testing.T) {
+	h := readHarness(t, trelloStub(t))
+
+	tests := []struct {
+		name  string
+		limit string
+	}{
+		{"negative", "-5"},
+		{"zero", "0"},
+		{"above Trello's cap", strconv.Itoa(trello.MaxActionsPerPage + 1)},
+	}
+	for _, tt := range tests {
+		for _, cmd := range [][]string{
+			{"activity", "list", "--board-id", "000000000000000000000001"},
+			{"comments", "list", "--card-id", "000000000000000000000020"},
+		} {
+			t.Run(cmd[0]+" "+tt.name, func(t *testing.T) {
+				if got := h.run(append(cmd, "--limit", tt.limit)...); got != errx.CodeUsage {
+					t.Fatalf("exit code = %d, want %d (usage)\n%s", got, errx.CodeUsage, h.out())
+				}
+			})
+		}
+	}
+}
+
+// Trello types a move, a rename, and an archive all as "updateCard" and tells
+// them apart only by the previous values it echoes back. Without `changed` they
+// are the same row with both list names blank.
+func TestActivityListNamesWhichFieldAnUpdateChanged(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`[
+			{"id":"a5","type":"updateCard","date":"2026-08-06T18:00:00.000Z",
+			 "memberCreator":{"username":"nik"},
+			 "data":{"card":{"id":"c1","name":"Ship it v2","shortLink":"s1"},"old":{"name":"Ship it"}}},
+			{"id":"a4","type":"updateCard","date":"2026-08-06T17:00:00.000Z",
+			 "memberCreator":{"username":"nik"},
+			 "data":{"card":{"id":"c1","name":"Ship it","shortLink":"s1"},"old":{"closed":false}}},
+			{"id":"a3","type":"updateCard","date":"2026-08-06T16:00:00.000Z",
+			 "memberCreator":{"username":"nik"},
+			 "data":{"card":{"id":"c1","name":"Ship it","shortLink":"s1"},"old":{"idList":"L1"},
+			         "listBefore":{"name":"Doing"},"listAfter":{"name":"Done"}}},
+			{"id":"a2","type":"updateCard","date":"2026-08-06T15:00:00.000Z",
+			 "memberCreator":{"username":"nik"},
+			 "data":{"card":{"id":"c1","name":"Ship it","shortLink":"s1"},
+			         "old":{"pos":1,"idList":"L1"},"listBefore":{"name":"Doing"},"listAfter":{"name":"Done"}}},
+			{"id":"a1","type":"createCard","date":"2026-08-06T14:00:00.000Z",
+			 "memberCreator":{"username":"nik"},
+			 "data":{"card":{"id":"c2","name":"New","shortLink":"s2"},"list":{"name":"Inbox"}}}
+		]`))
+	}))
+	defer srv.Close()
+
+	h := newHarness(t, map[string]string{
+		auth.EnvAPIKey:        "k",
+		auth.EnvToken:         "t",
+		"TRELLO_CLI_BASE_URL": srv.URL,
+	}, nil)
+
+	if got := h.run("activity", "list", "--board-id", "000000000000000000000001", "--type", "all"); got != errx.CodeOK {
+		t.Fatalf("exit code = %d, want 0\n%s", got, h.err())
+	}
+	var env struct {
+		Data []struct {
+			ID      string `json:"id"`
+			Changed string `json:"changed"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(h.out()), &env); err != nil {
+		t.Fatalf("bad envelope: %v\n%s", err, h.out())
+	}
+	want := map[string]string{
+		"a5": "name",
+		"a4": "closed",
+		"a3": "idList",
+		// Sorted, so a multi-field update renders the same way every time.
+		"a2": "idList,pos",
+		// Not an update; nothing changed on an object that did not exist before.
+		"a1": "",
+	}
+	if len(env.Data) != len(want) {
+		t.Fatalf("data = %+v, want %d rows", env.Data, len(want))
+	}
+	for _, row := range env.Data {
+		if got := row.Changed; got != want[row.ID] {
+			t.Errorf("%s changed = %q, want %q", row.ID, got, want[row.ID])
+		}
+	}
+}
+
+// Text output drops empty values rather than padding them, so a creation's
+// blank listBefore would slide its destination list into the column the source
+// list holds one row up.
+func TestActivityListTextTellsACreationFromAMove(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`[
+			{"id":"a2","type":"updateCard","date":"2026-08-06T16:00:00.000Z",
+			 "memberCreator":{"username":"nik"},
+			 "data":{"card":{"id":"c1","name":"Ship it","shortLink":"s1"},"old":{"idList":"L1"},
+			         "listBefore":{"name":"Doing"},"listAfter":{"name":"Done"}}},
+			{"id":"a1","type":"createCard","date":"2026-08-06T14:00:00.000Z",
+			 "data":{"card":{"id":"c2","name":"New","shortLink":"s2"},"list":{"name":"Inbox"}}}
+		]`))
+	}))
+	defer srv.Close()
+
+	h := newHarness(t, map[string]string{
+		auth.EnvAPIKey:        "k",
+		auth.EnvToken:         "t",
+		"TRELLO_CLI_BASE_URL": srv.URL,
+	}, nil)
+
+	if got := h.run("activity", "list", "--board-id", "000000000000000000000001", "-o", "text"); got != errx.CodeOK {
+		t.Fatalf("exit code = %d, want 0\n%s", got, h.err())
+	}
+	lines := strings.Split(strings.TrimSpace(h.out()), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("got %d lines, want 2:\n%s", len(lines), h.out())
+	}
+	if !strings.Contains(lines[0], "Doing  -> Done") {
+		t.Errorf("move line does not name a direction:\n%s", lines[0])
+	}
+	if !strings.Contains(lines[1], "-> Inbox") {
+		t.Errorf("creation line does not mark its list as the destination:\n%s", lines[1])
+	}
+	// The creation has no memberCreator: Butler and app-created actions carry
+	// none, and "@" on its own is not a username.
+	if strings.Contains(lines[1], "@") {
+		t.Errorf("member-less action rendered a bare sigil:\n%s", lines[1])
+	}
+}
+
+// Trello answers some errors as text/plain. A client that assumes JSON panics
+// there, which would reach the caller as exit 1 or 2 rather than the real code.
+func TestActivityListSurvivesANonJSONErrorBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte("invalid token"))
+	}))
+	defer srv.Close()
+
+	h := newHarness(t, map[string]string{
+		auth.EnvAPIKey:        "k",
+		auth.EnvToken:         "t",
+		"TRELLO_CLI_BASE_URL": srv.URL,
+	}, nil)
+
+	if got := h.run("activity", "list", "--board-id", "000000000000000000000001"); got != errx.CodeAuth {
+		t.Fatalf("exit code = %d, want %d (auth)\n%s", got, errx.CodeAuth, h.out())
+	}
+	if strings.Contains(h.out(), `"t"`) {
+		t.Errorf("the token reached the error output:\n%s", h.out())
 	}
 }
 

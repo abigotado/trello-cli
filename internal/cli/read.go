@@ -295,10 +295,13 @@ func (a *App) newCommentsCommand() *cobra.Command {
 	cardRef.bind(cmd, "card", "card name, id, or shortLink")
 	// Trello caps actions at 1000 per call, so a card with a long history needs
 	// both a bound and a cursor.
-	cmd.Flags().IntVar(&limit, "limit", 0, "maximum comments to return (server default when unset)")
+	cmd.Flags().IntVar(&limit, "limit", trello.DefaultActionsPageSize, "maximum comments to return (1-1000)")
 	cmd.Flags().StringVar(&before, "before", "", "return only comments older than this comment id or ISO date")
 
 	sub := a.newCommand(requires(cmd, "card"), func(ctx context.Context, _ *cobra.Command, _ []string) error {
+		if err := checkActionLimit(limit); err != nil {
+			return err
+		}
 		client, err := a.trelloClient(ctx)
 		if err != nil {
 			return err
@@ -318,7 +321,7 @@ func (a *App) newCommentsCommand() *cobra.Command {
 		// A page that came back exactly full is the only signal Trello gives
 		// that more may exist. Reporting truncated:false there would tell the
 		// caller it had everything.
-		return a.out.SuccessPage(views, limit > 0 && len(comments) == limit)
+		return a.out.SuccessPage(views, len(comments) == limit)
 	})
 	return group("comments", "Work with card comments", append([]*cobra.Command{sub}, a.commentsWriteCommands()...)...)
 }
@@ -336,18 +339,25 @@ func (a *App) newActivityCommand() *cobra.Command {
 			"Trello's activity feed also carries comments, label and due-date edits,\n" +
 			"member changes, and more. Those are noise for the report this command\n" +
 			"exists to build, so the default --type is 'createCard,updateCard:idList'.\n" +
-			"Pass --type with Trello's action-type names to widen or replace it.\n\n" +
-			"--since and --before each take an action id or an ISO 8601 date, and\n" +
-			"bound the same way comments list does.",
+			"Pass --type with Trello's action-type names to widen or replace it. On a\n" +
+			"widened feed the 'changed' field names which card fields an update\n" +
+			"touched, since Trello types a move, a rename, and an archive alike.\n\n" +
+			"--since and --before each take an action id or an ISO 8601 date. The\n" +
+			"feed is newest-first and --limit cuts from the old end, so --since sets\n" +
+			"a floor rather than a window: page backwards with --before, carrying the\n" +
+			"oldest id you got, until a page comes back with truncated false.",
 		Args: cobra.NoArgs,
 	}
 	boardRef.bind(cmd, "board", "board name, id, or shortLink")
 	cmd.Flags().StringVar(&since, "since", "", "return only activity newer than this action id or ISO date")
 	cmd.Flags().StringVar(&before, "before", "", "return only activity older than this action id or ISO date")
 	cmd.Flags().StringVar(&filter, "type", "", "comma-separated Trello action types (default: createCard,updateCard:idList)")
-	cmd.Flags().IntVar(&limit, "limit", 0, "maximum items to return (server default when unset)")
+	cmd.Flags().IntVar(&limit, "limit", trello.DefaultActionsPageSize, "maximum items to return (1-1000)")
 
 	sub := a.newCommand(requires(cmd, "board"), func(ctx context.Context, _ *cobra.Command, _ []string) error {
+		if err := checkActionLimit(limit); err != nil {
+			return err
+		}
 		client, err := a.trelloClient(ctx)
 		if err != nil {
 			return err
@@ -366,9 +376,23 @@ func (a *App) newActivityCommand() *cobra.Command {
 		}
 		// Same signal as comments list: a page that came back exactly full is
 		// the only hint Trello gives that more may exist.
-		return a.out.SuccessPage(views, limit > 0 && len(items) == limit)
+		return a.out.SuccessPage(views, len(items) == limit)
 	})
 	return group("activity", "Work with board activity", sub)
+}
+
+// checkActionLimit rejects a --limit an actions feed cannot honor.
+//
+// Both bounds matter for the same reason. A non-positive limit used to be
+// dropped from the request, leaving Trello to apply its own page size while the
+// envelope still said truncated:false — the caller was handed the newest page
+// and told it was the whole history. A limit above the cap comes back short of
+// what was asked for, which reads as an unfilled page and reports the same lie.
+func checkActionLimit(limit int) error {
+	if limit < 1 || limit > trello.MaxActionsPerPage {
+		return errx.Usage("--limit must be between 1 and %d", trello.MaxActionsPerPage)
+	}
+	return nil
 }
 
 func (a *App) newChecklistsCommand() *cobra.Command {
