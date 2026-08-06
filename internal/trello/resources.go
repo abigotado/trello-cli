@@ -212,6 +212,11 @@ func (c *Client) Activity(ctx context.Context, boardID, filter string, page Page
 	if filter == "" {
 		filter = DefaultActivityFilter
 	}
+	// No fields parameter, deliberately, against the convention at the top of
+	// this file. Trello ignores fields and memberCreator_fields on the actions
+	// endpoints: measured against a live board, 60 actions came back as the
+	// same 134723 bytes with them and without, decoding to identical rows.
+	// Sending them would advertise a narrowing that does not happen.
 	q := url.Values{"filter": {filter}}
 	page.apply(q)
 
