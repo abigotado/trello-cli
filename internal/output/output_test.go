@@ -355,6 +355,10 @@ func TestTextRendering(t *testing.T) {
 			{"slice", Field{Name: "x", Value: "", Raw: []string{"a", "b"}}, "[a b]"},
 			{"nil interface", Field{Name: "x", Value: "", Raw: nil}, ""},
 			{"typed nil map", Field{Name: "x", Value: "", Raw: map[string]string(nil)}, ""},
+			// Whether a view left a collection nil or built it empty is an
+			// implementation detail; both have to read the same.
+			{"empty slice reads as nil does", Field{Name: "x", Value: "", Raw: []string{}}, ""},
+			{"empty map reads as nil does", Field{Name: "x", Value: "", Raw: map[string]int{}}, ""},
 			{"value wins over raw", Field{Name: "x", Value: "shown", Raw: "hidden"}, "shown"},
 		}
 		for _, tt := range tests {
