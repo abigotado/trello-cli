@@ -353,10 +353,16 @@ func textCell(f Field) string {
 	if s, ok := f.Raw.(string); ok {
 		return s
 	}
-	// A typed nil — the card of an action that has none — is not == nil, and
-	// would otherwise print as "map[]".
 	switch v := reflect.ValueOf(f.Raw); v.Kind() {
-	case reflect.Map, reflect.Slice, reflect.Pointer, reflect.Interface:
+	case reflect.Map, reflect.Slice:
+		// Empty and nil render alike. Whether a view left a collection nil or
+		// built it empty is an implementation detail, and "[]" for one against
+		// a blank for the other is a distinction no caller can act on.
+		if v.Len() == 0 {
+			return ""
+		}
+	case reflect.Pointer, reflect.Interface:
+		// A typed nil is not == nil and would print as its zero value.
 		if v.IsNil() {
 			return ""
 		}
