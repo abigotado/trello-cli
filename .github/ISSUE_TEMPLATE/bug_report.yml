@@ -1,0 +1,75 @@
+name: Bug report
+description: The binary does something it should not, or reports it wrongly.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Before you paste anything:** Trello passes `key` and `token` as query
+        parameters, so a command line, a log, or `--verbose` output can contain
+        a live credential. Redact the query string. If you think a token has
+        already been exposed, see
+        [SECURITY.md](https://github.com/abigotado/trello-cli/blob/main/SECURITY.md).
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `trello-cli version -o json`.
+      placeholder: v0.1.0
+    validations:
+      required: true
+
+  - type: input
+    id: platform
+    attributes:
+      label: OS and architecture
+      placeholder: macOS 15.5, arm64
+    validations:
+      required: true
+
+  - type: textarea
+    id: command
+    attributes:
+      label: Command
+      description: The exact invocation, with any credential redacted.
+      render: console
+      placeholder: trello-cli cards create --board Bangr --list Doing --name "Fix login"
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened
+      description: >
+        The full envelope from stdout, plus the exit code (`echo $?`). The exit
+        code matters as much as the message — it is what a calling agent acts on.
+      render: json
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected instead
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Anything else
+      description: >
+        Whether it reproduces with `--dry-run`, whether the board or list name
+        is ambiguous, whether it started after an upgrade.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: hygiene
+    attributes:
+      label: Confirmation
+      options:
+        - label: This report contains no API key or token, in any pasted output.
+          required: true

@@ -1,0 +1,54 @@
+name: Feature or command proposal
+description: Something the command surface cannot express today.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The command surface is a published API consumed by agents, so a new
+        command is easier to agree on before it is written than after. Contract
+        changes — renamed flags, new exit codes, changed envelope fields — are
+        discussed here first; see
+        [CONTRIBUTING.md](https://github.com/abigotado/trello-cli/blob/main/CONTRIBUTING.md#contract-changes).
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What you cannot do today
+      description: >
+        Describe the task, not the feature. What were you or your agent trying
+        to accomplish when the CLI ran out of surface?
+    validations:
+      required: true
+
+  - type: textarea
+    id: workaround
+    attributes:
+      label: How you work around it now
+      description: Several commands chained, jq over `-o json`, the Trello UI, nothing.
+    validations:
+      required: false
+
+  - type: textarea
+    id: surface
+    attributes:
+      label: Proposed command and flags
+      description: >
+        A sketch is fine. Name-or-ID pairs are `--board` / `--board-id`. Say what
+        the `data` payload should carry — default output is one compact line per
+        entity, because context is the scarce resource.
+      render: console
+      placeholder: trello-cli cards link --card "Fix login" --to "Auth rewrite"
+    validations:
+      required: false
+
+  - type: dropdown
+    id: impact
+    attributes:
+      label: Contract impact
+      options:
+        - Additive — a new command, flag, or error code only
+        - Breaking — renames or removes an existing flag, field, or exit code
+        - Not sure
+    validations:
+      required: true
