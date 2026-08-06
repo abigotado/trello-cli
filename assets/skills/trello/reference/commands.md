@@ -49,7 +49,7 @@ Requires: `--board`
 | --- | --- | --- | --- |
 | `--before` | string |  | return only activity older than this action id or ISO date |
 | `--board` | string |  | board name, id, or shortLink |
-| `--limit` | int | `0` | maximum items to return (server default when unset) |
+| `--limit` | int | `50` | maximum items to return (1-1000) |
 | `--since` | string |  | return only activity newer than this action id or ISO date |
 | `--type` | string |  | comma-separated Trello action types (default: createCard,updateCard:idList) |
 
@@ -310,7 +310,7 @@ Requires: `--card`
 | `--before` | string |  | return only comments older than this comment id or ISO date |
 | `--board` | string |  | board to resolve the card name within |
 | `--card` | string |  | card name, id, or shortLink |
-| `--limit` | int | `0` | maximum comments to return (server default when unset) |
+| `--limit` | int | `50` | maximum comments to return (1-1000) |
 
 ### `trello-cli contract`
 
