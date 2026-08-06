@@ -516,6 +516,17 @@ func trelloStub(t *testing.T) *httptest.Server {
 	mux.HandleFunc("/boards/000000000000000000000001/cards", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`[{"id":"000000000000000000000020","name":"Ship it","shortLink":"dddddddd","idList":"000000000000000000000010"}]`))
 	})
+	mux.HandleFunc("/boards/000000000000000000000001/actions", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`[
+			{"id":"000000000000000000000030","type":"createCard","date":"2026-08-05T23:36:44.002Z",
+			 "memberCreator":{"username":"nik"},
+			 "data":{"card":{"id":"000000000000000000000020","name":"Ship it","shortLink":"dddddddd"},"list":{"name":"Doing"}}},
+			{"id":"000000000000000000000031","type":"updateCard","date":"2026-08-06T15:50:29.045Z",
+			 "memberCreator":{"username":"nik"},
+			 "data":{"card":{"id":"000000000000000000000020","name":"Ship it","shortLink":"dddddddd"},
+			         "listBefore":{"name":"Doing"},"listAfter":{"name":"Done"}}}
+		]`))
+	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	return srv
@@ -682,6 +693,104 @@ func TestFieldsProjectionOnAListing(t *testing.T) {
 		if len(row) != 2 {
 			t.Errorf("row has %d keys, want 2: %v", len(row), row)
 		}
+	}
+}
+
+// activity list distinguishes a creation (list only) from a move (before and
+// after), and both must decode into the row shape a caller reads.
+func TestActivityListReturnsCreatesAndMoves(t *testing.T) {
+	h := readHarness(t, trelloStub(t))
+	if got := h.run("activity", "list", "--board", "Roadmap"); got != errx.CodeOK {
+		t.Fatalf("exit code = %d, want 0\n%s", got, h.err())
+	}
+	var env struct {
+		Data []struct {
+			Type       string `json:"type"`
+			ListBefore string `json:"listBefore"`
+			ListAfter  string `json:"listAfter"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(h.out()), &env); err != nil {
+		t.Fatalf("bad envelope: %v\n%s", err, h.out())
+	}
+	if len(env.Data) != 2 {
+		t.Fatalf("data = %+v, want 2 rows", env.Data)
+	}
+	create, move := env.Data[0], env.Data[1]
+	if create.Type != "createCard" || create.ListBefore != "" || create.ListAfter != "Doing" {
+		t.Errorf("createCard row = %+v, want listBefore empty and listAfter Doing", create)
+	}
+	if move.Type != "updateCard" || move.ListBefore != "Doing" || move.ListAfter != "Done" {
+		t.Errorf("updateCard row = %+v, want listBefore Doing and listAfter Done", move)
+	}
+}
+
+// Without --type, the request must ask Trello for creations and moves only —
+// not its full, noisy default action feed. --type must override that
+// verbatim, and --since/--before must reach the request unchanged.
+func TestActivityListFilterAndPaging(t *testing.T) {
+	var gotFilter, gotSince, gotBefore string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotFilter = r.URL.Query().Get("filter")
+		gotSince = r.URL.Query().Get("since")
+		gotBefore = r.URL.Query().Get("before")
+		_, _ = w.Write([]byte(`[]`))
+	}))
+	defer srv.Close()
+
+	h := newHarness(t, map[string]string{
+		auth.EnvAPIKey:        "k",
+		auth.EnvToken:         "t",
+		"TRELLO_CLI_BASE_URL": srv.URL,
+	}, nil)
+
+	if got := h.run("activity", "list", "--board-id", "000000000000000000000001"); got != errx.CodeOK {
+		t.Fatalf("exit code = %d, want 0\n%s", got, h.err())
+	}
+	if gotFilter != "createCard,updateCard:idList" {
+		t.Errorf("default filter = %q, want createCard,updateCard:idList", gotFilter)
+	}
+
+	if got := h.run("activity", "list", "--board-id", "000000000000000000000001",
+		"--type", "commentCard", "--since", "2026-08-03T00:00:00Z", "--before", "act123"); got != errx.CodeOK {
+		t.Fatalf("exit code = %d, want 0\n%s", got, h.err())
+	}
+	if gotFilter != "commentCard" {
+		t.Errorf("--type filter = %q, want commentCard", gotFilter)
+	}
+	if gotSince != "2026-08-03T00:00:00Z" || gotBefore != "act123" {
+		t.Errorf("since = %q, before = %q, want the flag values passed through", gotSince, gotBefore)
+	}
+}
+
+// An empty result set is still a collection: meta must report count 0 and
+// truncated false, not omit meta or default truncated to something else.
+func TestActivityListWithNoResultsCarriesZeroMeta(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`[]`))
+	}))
+	defer srv.Close()
+
+	h := newHarness(t, map[string]string{
+		auth.EnvAPIKey:        "k",
+		auth.EnvToken:         "t",
+		"TRELLO_CLI_BASE_URL": srv.URL,
+	}, nil)
+
+	if got := h.run("activity", "list", "--board-id", "000000000000000000000001"); got != errx.CodeOK {
+		t.Fatalf("exit code = %d, want 0\n%s", got, h.err())
+	}
+	var env struct {
+		Meta *struct {
+			Count     int  `json:"count"`
+			Truncated bool `json:"truncated"`
+		} `json:"meta"`
+	}
+	if err := json.Unmarshal([]byte(h.out()), &env); err != nil {
+		t.Fatalf("bad envelope: %v\n%s", err, h.out())
+	}
+	if env.Meta == nil || env.Meta.Count != 0 || env.Meta.Truncated {
+		t.Errorf("meta = %+v, want count 0 and truncated false", env.Meta)
 	}
 }
 

@@ -95,6 +95,99 @@ type commentAction struct {
 	} `json:"memberCreator"`
 }
 
+// Activity is a createCard action or a list-to-list move (an updateCard
+// action that changed idList) on a board.
+//
+// Trello's actions endpoint also returns comments, label and due-date edits,
+// member changes, and more; those are reachable through an explicit filter
+// but are not what this fetches by default, since a status report built from
+// board activity wants creations and moves, not every edit.
+type Activity struct {
+	ID            string `json:"id"`
+	Type          string `json:"type"`
+	Date          string `json:"date"`
+	Member        string `json:"member"`
+	CardID        string `json:"cardId"`
+	CardName      string `json:"cardName"`
+	CardShortLink string `json:"cardShortLink"`
+	// ListBefore and ListAfter are set for a move. A creation carries only
+	// ListAfter, the list the card was created into.
+	ListBefore string `json:"listBefore,omitempty"`
+	ListAfter  string `json:"listAfter,omitempty"`
+}
+
+// DefaultActivityFilter is the action-type filter Activity applies when the
+// caller does not name one: card creations and list-to-list moves.
+const DefaultActivityFilter = "createCard,updateCard:idList"
+
+// activityAction is the wire shape for a createCard or updateCard action.
+type activityAction struct {
+	ID            string `json:"id"`
+	Type          string `json:"type"`
+	Date          string `json:"date"`
+	MemberCreator struct {
+		Username string `json:"username"`
+	} `json:"memberCreator"`
+	Data struct {
+		Card struct {
+			ID        string `json:"id"`
+			Name      string `json:"name"`
+			ShortLink string `json:"shortLink"`
+		} `json:"card"`
+		// List is populated on a createCard action: the list the card landed
+		// in. ListBefore/ListAfter are populated on the updateCard move
+		// instead; a single action never carries both shapes.
+		List struct {
+			Name string `json:"name"`
+		} `json:"list"`
+		ListBefore struct {
+			Name string `json:"name"`
+		} `json:"listBefore"`
+		ListAfter struct {
+			Name string `json:"name"`
+		} `json:"listAfter"`
+	} `json:"data"`
+}
+
+// Activity returns a board's activity, newest first, bounded by page.
+//
+// An empty filter defaults to DefaultActivityFilter. Pass Trello action-type
+// names (comma-separated, optionally field-scoped like "updateCard:idList")
+// to widen or change it.
+func (c *Client) Activity(ctx context.Context, boardID, filter string, page Page) ([]Activity, error) {
+	if filter == "" {
+		filter = DefaultActivityFilter
+	}
+	q := url.Values{"filter": {filter}}
+	page.apply(q)
+
+	var actions []activityAction
+	if err := c.Get(ctx, "boards/"+url.PathEscape(boardID)+"/actions", q, &actions); err != nil {
+		return nil, err
+	}
+	activities := make([]Activity, 0, len(actions))
+	for _, a := range actions {
+		act := Activity{
+			ID:            a.ID,
+			Type:          a.Type,
+			Date:          a.Date,
+			Member:        a.MemberCreator.Username,
+			CardID:        a.Data.Card.ID,
+			CardName:      a.Data.Card.Name,
+			CardShortLink: a.Data.Card.ShortLink,
+		}
+		switch a.Type {
+		case "createCard":
+			act.ListAfter = a.Data.List.Name
+		case "updateCard":
+			act.ListBefore = a.Data.ListBefore.Name
+			act.ListAfter = a.Data.ListAfter.Name
+		}
+		activities = append(activities, act)
+	}
+	return activities, nil
+}
+
 // Checklist is a card checklist with its items.
 type Checklist struct {
 	ID    string          `json:"id"`

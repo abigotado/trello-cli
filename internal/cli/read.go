@@ -23,6 +23,7 @@ func (a *App) readCommands() []*cobra.Command {
 		a.newCommentsCommand(),
 		a.newChecklistsCommand(),
 		a.newAttachmentsCommand(),
+		a.newActivityCommand(),
 		a.newSearchCommand(),
 		a.newCacheCommand(),
 	}
@@ -320,6 +321,54 @@ func (a *App) newCommentsCommand() *cobra.Command {
 		return a.out.SuccessPage(views, limit > 0 && len(comments) == limit)
 	})
 	return group("comments", "Work with card comments", append([]*cobra.Command{sub}, a.commentsWriteCommands()...)...)
+}
+
+func (a *App) newActivityCommand() *cobra.Command {
+	var boardRef objectRef
+	var limit int
+	var since, before, filter string
+
+	cmd := &cobra.Command{
+		Use:   "list",
+		Short: "List board activity: card creations and list moves",
+		Long: "List a board's activity, newest first: card creations and\n" +
+			"list-to-list moves.\n\n" +
+			"Trello's activity feed also carries comments, label and due-date edits,\n" +
+			"member changes, and more. Those are noise for the report this command\n" +
+			"exists to build, so the default --type is 'createCard,updateCard:idList'.\n" +
+			"Pass --type with Trello's action-type names to widen or replace it.\n\n" +
+			"--since and --before each take an action id or an ISO 8601 date, and\n" +
+			"bound the same way comments list does.",
+		Args: cobra.NoArgs,
+	}
+	boardRef.bind(cmd, "board", "board name, id, or shortLink")
+	cmd.Flags().StringVar(&since, "since", "", "return only activity newer than this action id or ISO date")
+	cmd.Flags().StringVar(&before, "before", "", "return only activity older than this action id or ISO date")
+	cmd.Flags().StringVar(&filter, "type", "", "comma-separated Trello action types (default: createCard,updateCard:idList)")
+	cmd.Flags().IntVar(&limit, "limit", 0, "maximum items to return (server default when unset)")
+
+	sub := a.newCommand(requires(cmd, "board"), func(ctx context.Context, _ *cobra.Command, _ []string) error {
+		client, err := a.trelloClient(ctx)
+		if err != nil {
+			return err
+		}
+		board, err := a.board(ctx, boardRef)
+		if err != nil {
+			return err
+		}
+		items, err := client.Activity(ctx, board.ID, filter, trello.Page{Limit: limit, Since: since, Before: before})
+		if err != nil {
+			return err
+		}
+		views := make([]activityView, 0, len(items))
+		for _, it := range items {
+			views = append(views, activityView{it})
+		}
+		// Same signal as comments list: a page that came back exactly full is
+		// the only hint Trello gives that more may exist.
+		return a.out.SuccessPage(views, limit > 0 && len(items) == limit)
+	})
+	return group("activity", "Work with board activity", sub)
 }
 
 func (a *App) newChecklistsCommand() *cobra.Command {

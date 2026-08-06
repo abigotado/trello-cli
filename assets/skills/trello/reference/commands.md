@@ -39,6 +39,20 @@ Available on every command.
 
 ## Commands
 
+### `trello-cli activity list`
+
+List board activity: card creations and list moves
+
+Requires: `--board`
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--before` | string |  | return only activity older than this action id or ISO date |
+| `--board` | string |  | board name, id, or shortLink |
+| `--limit` | int | `0` | maximum items to return (server default when unset) |
+| `--since` | string |  | return only activity newer than this action id or ISO date |
+| `--type` | string |  | comma-separated Trello action types (default: createCard,updateCard:idList) |
+
 ### `trello-cli attachments add`  **W**
 
 Attach a URL to a card
