@@ -893,7 +893,10 @@ func TestActivityListNamesWhichFieldAnUpdateChanged(t *testing.T) {
 			         "old":{"pos":1,"idList":"L1"},"listBefore":{"name":"Doing"},"listAfter":{"name":"Done"}}},
 			{"id":"a1","type":"createCard","date":"2026-08-06T14:00:00.000Z",
 			 "memberCreator":{"username":"nik"},
-			 "data":{"card":{"id":"c2","name":"New","shortLink":"s2"},"list":{"name":"Inbox"}}}
+			 "data":{"card":{"id":"c2","name":"New","shortLink":"s2"},"list":{"name":"Inbox"}}},
+			{"id":"a0","type":"updateCard","date":"2026-08-06T13:00:00.000Z",
+			 "memberCreator":{"username":"nik"},
+			 "data":{"card":{"id":"c1","name":"Ship it","shortLink":"s1"},"old":"not an object"}}
 		]`))
 	}))
 	defer srv.Close()
@@ -924,6 +927,10 @@ func TestActivityListNamesWhichFieldAnUpdateChanged(t *testing.T) {
 		"a2": "idList,pos",
 		// Not an update; nothing changed on an object that did not exist before.
 		"a1": "",
+		// --type lets any action type through, and not all of them shape
+		// data.old as an object. One the field cannot describe must cost the
+		// caller that field, never the rest of the page.
+		"a0": "",
 	}
 	if len(env.Data) != len(want) {
 		t.Fatalf("data = %+v, want %d rows", env.Data, len(want))
