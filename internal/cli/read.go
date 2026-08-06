@@ -318,10 +318,10 @@ func (a *App) newCommentsCommand() *cobra.Command {
 		for _, c := range comments {
 			views = append(views, commentView{c})
 		}
-		// A page that came back exactly full is the only signal Trello gives
-		// that more may exist. Reporting truncated:false there would tell the
-		// caller it had everything.
-		return a.out.SuccessPage(views, len(comments) == limit)
+		// A page that came back full is the only signal Trello gives that more
+		// may exist. Reporting truncated:false there would tell the caller it
+		// had everything. See activity list for why this is not an equality.
+		return a.out.SuccessPage(views, len(comments) >= limit)
 	})
 	return group("comments", "Work with card comments", append([]*cobra.Command{sub}, a.commentsWriteCommands()...)...)
 }
@@ -374,9 +374,12 @@ func (a *App) newActivityCommand() *cobra.Command {
 		for _, it := range items {
 			views = append(views, activityView{it})
 		}
-		// Same signal as comments list: a page that came back exactly full is
-		// the only hint Trello gives that more may exist.
-		return a.out.SuccessPage(views, len(items) == limit)
+		// Same signal as comments list: a page that came back full is the only
+		// hint Trello gives that more may exist. Greater-than rather than
+		// equal because a proxy or a replay mock on TRELLO_CLI_BASE_URL can
+		// over-deliver, and reading that as an unfilled page would report the
+		// history complete.
+		return a.out.SuccessPage(views, len(items) >= limit)
 	})
 	return group("activity", "Work with board activity", sub)
 }

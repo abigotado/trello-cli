@@ -133,10 +133,19 @@ func (a activityView) Fields() []output.Field {
 	if listAfter != "" {
 		listAfter = "-> " + listAfter
 	}
+	// Text folds the changed fields into the type rather than spending a column
+	// on them. "updateCard:idList" is how Trello itself names the pair and how
+	// --type takes it, and a column that is empty on every action that is not an
+	// update would slide every value after it one place left — the same defect
+	// the arrow above exists to prevent.
+	kind := a.Type
+	if a.Changed != "" {
+		kind += ":" + a.Changed
+	}
 	return []output.Field{
 		{Name: "id", Value: a.ID, Raw: a.ID},
-		{Name: "type", Value: a.Type, Raw: a.Type},
-		{Name: "changed", Value: a.Changed, Raw: a.Changed},
+		{Name: "type", Value: kind, Raw: a.Type},
+		{Name: "changed", Value: "", Raw: a.Changed},
 		{Name: "date", Value: a.Date, Raw: a.Date},
 		// Butler and other app-created actions carry no member, and a bare "@"
 		// is not a username.

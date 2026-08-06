@@ -994,17 +994,105 @@ func TestActivityListSurvivesANonJSONErrorBody(t *testing.T) {
 	}))
 	defer srv.Close()
 
+	// A token that cannot occur in the output by coincidence. A one-character
+	// secret makes this assertion pass against a binary that prints the whole
+	// query string, which is the leak it is here to catch.
+	const token = "tok-must-not-appear-anywhere"
 	h := newHarness(t, map[string]string{
 		auth.EnvAPIKey:        "k",
-		auth.EnvToken:         "t",
+		auth.EnvToken:         token,
 		"TRELLO_CLI_BASE_URL": srv.URL,
 	}, nil)
 
 	if got := h.run("activity", "list", "--board-id", "000000000000000000000001"); got != errx.CodeAuth {
 		t.Fatalf("exit code = %d, want %d (auth)\n%s", got, errx.CodeAuth, h.out())
 	}
-	if strings.Contains(h.out(), `"t"`) {
-		t.Errorf("the token reached the error output:\n%s", h.out())
+	// A wrapped *url.Error carries the full request URL, token and all. Both
+	// streams, because -v output is subject to the same rule.
+	for name, stream := range map[string]string{"stdout": h.out(), "stderr": h.err()} {
+		if strings.Contains(stream, token) {
+			t.Errorf("the token reached %s:\n%s", name, stream)
+		}
+	}
+}
+
+// An action that names no card must say so. Building the card object
+// unconditionally handed the caller a truthy object whose id was blank, and
+// --type reaches action types that carry no card at all.
+func TestActivityListOmitsACardThatIsNotThere(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`[
+			{"id":"a2","type":"createCard","date":"2026-08-06T16:00:00.000Z",
+			 "memberCreator":{"username":"nik"},
+			 "data":{"card":{"id":"c1","name":"Ship it","shortLink":"s1"},"list":{"name":"Doing"}}},
+			{"id":"a1","type":"addMemberToBoard","date":"2026-08-06T14:00:00.000Z",
+			 "memberCreator":{"username":"nik"},"data":{"board":{"name":"Roadmap"}}}
+		]`))
+	}))
+	defer srv.Close()
+
+	h := newHarness(t, map[string]string{
+		auth.EnvAPIKey:        "k",
+		auth.EnvToken:         "t",
+		"TRELLO_CLI_BASE_URL": srv.URL,
+	}, nil)
+
+	if got := h.run("activity", "list", "--board-id", "000000000000000000000001", "--type", "all"); got != errx.CodeOK {
+		t.Fatalf("exit code = %d, want 0\n%s", got, h.err())
+	}
+	var env struct {
+		Data []struct {
+			ID   string `json:"id"`
+			Card *struct {
+				ID string `json:"id"`
+			} `json:"card"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(h.out()), &env); err != nil {
+		t.Fatalf("bad envelope: %v\n%s", err, h.out())
+	}
+	if len(env.Data) != 2 {
+		t.Fatalf("data = %+v, want 2 rows", env.Data)
+	}
+	if env.Data[0].Card == nil || env.Data[0].Card.ID != "c1" {
+		t.Errorf("card row lost its card: %+v", env.Data[0])
+	}
+	if env.Data[1].Card != nil {
+		t.Errorf("card = %+v on an action that has none; want null", env.Data[1].Card)
+	}
+}
+
+// Trello serializes a deleted member as no memberCreator at all. "@" on its
+// own is not a username, and text output drops an empty value rather than
+// printing a sigil with nothing after it.
+func TestCommentsListTextOmitsAMissingAuthor(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`[
+			{"id":"n2","date":"2026-08-06T16:00:00.000Z","data":{"text":"orphaned"}},
+			{"id":"n1","date":"2026-08-06T15:00:00.000Z","memberCreator":{"username":"nik"},
+			 "data":{"text":"mine"}}
+		]`))
+	}))
+	defer srv.Close()
+
+	h := newHarness(t, map[string]string{
+		auth.EnvAPIKey:        "k",
+		auth.EnvToken:         "t",
+		"TRELLO_CLI_BASE_URL": srv.URL,
+	}, nil)
+
+	if got := h.run("comments", "list", "--card-id", "000000000000000000000020", "-o", "text"); got != errx.CodeOK {
+		t.Fatalf("exit code = %d, want 0\n%s", got, h.err())
+	}
+	lines := strings.Split(strings.TrimSpace(h.out()), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("got %d lines, want 2:\n%s", len(lines), h.out())
+	}
+	if strings.Contains(lines[0], "@") {
+		t.Errorf("author-less comment rendered a bare sigil:\n%s", lines[0])
+	}
+	if !strings.Contains(lines[1], "@nik") {
+		t.Errorf("a real author lost its sigil:\n%s", lines[1])
 	}
 }
 
