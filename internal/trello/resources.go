@@ -137,8 +137,11 @@ const DefaultActivityFilter = "createCard,updateCard:idList"
 // way to tell a full page from a complete history. Sending the limit
 // explicitly is what makes len(items) == limit a usable truncation signal.
 const (
-	// DefaultActionsPageSize mirrors Trello's own server-side default, so
-	// naming it explicitly bounds the request without changing what comes back.
+	// DefaultActionsPageSize is what a caller that names no size gets. It is
+	// chosen to match the page Trello returns unasked, so putting a number on
+	// the request changes how much comes back as little as possible. Note that
+	// meta.truncated is honest because the limit is sent at all, not because
+	// this number is the right one.
 	DefaultActionsPageSize = 50
 	// MaxActionsPerPage is Trello's hard cap for a single actions call. Asking
 	// for more returns this many, which would read as an unfilled page.
@@ -171,22 +174,29 @@ type activityAction struct {
 		ListAfter struct {
 			Name string `json:"name"`
 		} `json:"listAfter"`
-		// Old holds the previous value of every field an update touched. Only
-		// its keys are read — they are the only thing that says which kind of
-		// update this was — so the values stay raw rather than being modeled.
-		Old map[string]json.RawMessage `json:"old"`
+		// Old holds the previous value of every field an update touched. It
+		// stays raw because only its keys are read, and because --type accepts
+		// any action type: decoding it straight into a map made one action
+		// whose old is not an object fail the whole listing.
+		Old json.RawMessage `json:"old"`
 	} `json:"data"`
 }
 
 // changedFields names the fields an update touched, from the previous values
 // Trello echoes back in data.old. Sorted, so an update that touched several
 // fields at once renders the same way every time.
-func changedFields(old map[string]json.RawMessage) string {
-	if len(old) == 0 {
+//
+// A shape other than an object yields no names rather than an error. This runs
+// over whatever action types --type let through, and one unrecognized action
+// costing the caller the entire page would be far worse than that action
+// arriving without its changed field.
+func changedFields(old json.RawMessage) string {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(old, &fields); err != nil || len(fields) == 0 {
 		return ""
 	}
-	names := make([]string, 0, len(old))
-	for name := range old {
+	names := make([]string, 0, len(fields))
+	for name := range fields {
 		names = append(names, name)
 	}
 	sort.Strings(names)
