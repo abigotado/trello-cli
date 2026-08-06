@@ -8,6 +8,6 @@ settings_file = "settings.json"
 instructions_file = "CLAUDE.md"
 agent_dir = "agents"
 hook_dir = "hooks"
-default_mode = "default"
+default_mode = "auto"
 skip_dangerous_mode_permission_prompt = false
 python_command = "${AGENT_HARNESS_PYTHON:-python3}"
