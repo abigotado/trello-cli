@@ -4,6 +4,17 @@ on:
   push:
     tags:
       - "v*"
+  # Pushing the tag is the normal trigger, and it depends on a webhook being
+  # delivered. When delivery is throttled or dropped the release never runs and
+  # there is nothing to re-run, because no run was ever created — the only way
+  # back in was to delete the tag and push it again and hope. This is the way
+  # back in that does not touch the tag: name one that already exists.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to release, e.g. v0.1.6"
+        required: true
+        type: string
 
 # The repository default for GITHUB_TOKEN is read-only, so the release job must
 # opt in. contents: write is the whole requirement — it covers creating the
@@ -11,6 +22,29 @@ on:
 # to none, which is what we want: no packages, no id-token, no discussions.
 permissions:
   contents: read
+
+# Two runs for the same tag stopped being hypothetical the moment a manual
+# trigger existed: a throttled webhook is indistinguishable from a dropped one,
+# so an operator waits, sees nothing, dispatches — and the delayed push run
+# starts too. Both would reach `goreleaser release`, where replace_existing_draft
+# has the second delete the first's release while it is still uploading, leaving
+# a checksums file listing artifacts that are not attached.
+#
+# Keyed on the tag rather than github.ref, which on a dispatch is the picker's
+# branch and would not collide with the push run at all. Written out rather than
+# read from env because the concurrency key does not accept that context.
+#
+# cancel-in-progress stays false: killing a run part-way through publishing is
+# the outcome this exists to prevent, not an acceptable way to reach it.
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+# The tag being released, whichever way the run started. On a tag push
+# github.ref_name is that tag; on a manual run inputs.tag is the one named, and
+# github.ref_name would be whatever ref the run was started from instead.
+env:
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
   release:
@@ -25,6 +59,33 @@ jobs:
         uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          # Fully qualified on purpose. An unqualified ref makes checkout look
+          # for a branch first and a tag second, so a branch sharing a tag's
+          # name would silently win. It also keeps a dispatch that names a
+          # branch failing here, plainly, rather than further down.
+          ref: refs/tags/${{ inputs.tag || github.ref_name }}
+
+      # Do not delete this in the belief that the ref above makes it redundant:
+      # the ref decides what is checked out, this decides whether the thing
+      # checked out is what was asked for. It catches an inputs.tag naming a
+      # nonexistent tag, and it is the last thing between a typo and a release
+      # that cannot be taken back.
+      - name: Assert the checkout is that tag
+        run: |
+          set -euo pipefail
+          # --points-at, not `describe --exact-match`. describe names *a* tag on
+          # the commit and picks by rules unrelated to this release: annotated
+          # beats lightweight, and among lightweight tags the earlier name wins.
+          # Verified on git 2.55 — with v0.1.6 and v0.1.7 both on HEAD it answers
+          # v0.1.6, and a `stable` tag beats them both. Releasing v0.1.7 from a
+          # commit that also carries `stable` would have failed here for no
+          # reason, on a tag already pushed and immutable.
+          if ! git tag --points-at HEAD | grep -Fxq -- "${RELEASE_TAG}"; then
+            here=$(git tag --points-at HEAD | paste -sd, -)
+            echo "::error::HEAD does not carry tag '${RELEASE_TAG}' (tags here: ${here:-none})"
+            exit 1
+          fi
+          echo "releasing ${RELEASE_TAG}"
 
       - name: Set up Go
         uses: actions/setup-go@v7
@@ -49,8 +110,8 @@ jobs:
           set -euo pipefail
           go build -o "${RUNNER_TEMP}/trello-cli" ./cmd/trello-cli
           got=$("${RUNNER_TEMP}/trello-cli" version -o json | jq -r '.data.version')
-          if [ "$got" != "${GITHUB_REF_NAME}" ]; then
-            echo "::error::binary reports version '$got', expected '${GITHUB_REF_NAME}'"
+          if [ "$got" != "${RELEASE_TAG}" ]; then
+            echo "::error::binary reports version '$got', expected '${RELEASE_TAG}'"
             exit 1
           fi
           echo "version stamp ok: $got"
@@ -74,6 +135,33 @@ jobs:
       - name: goreleaser check
         run: goreleaser check
 
+      # A dispatch can name any tag that exists, an old one included, and
+      # goreleaser would then push a cask for that version and move what
+      # `brew install` resolves to backwards. skip_upload: "auto" in
+      # .goreleaser.yaml does not cover this — it keys off prerelease, and an
+      # old stable tag is not a prerelease. Worse, release.draft means the cask
+      # can end up pointing at assets that 404 until someone publishes.
+      #
+      # Re-running an old tag is legitimate, though: the goreleaser config is
+      # written around it, replace_existing_artifacts and all. So the run
+      # proceeds and only the cask is held back. Verified that --skip=homebrew
+      # covers homebrew_casks: with it, dist/homebrew/Casks is never written.
+      - name: Decide whether the cask may move
+        run: |
+          set -euo pipefail
+          # Stable tags only, matching the prerelease: auto the cask already
+          # follows, and version order rather than string order so v0.1.10
+          # outranks v0.1.9.
+          latest=$(git tag --list 'v*' --sort=-version:refname \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
+          if [ "${RELEASE_TAG}" = "${latest}" ]; then
+            echo "CASK_SKIP=" >> "$GITHUB_ENV"
+            echo "${RELEASE_TAG} is the newest stable tag; the cask moves with it"
+          else
+            echo "CASK_SKIP=--skip=homebrew" >> "$GITHUB_ENV"
+            echo "::warning::${RELEASE_TAG} is not the newest stable tag (${latest:-none}); leaving the Homebrew cask alone"
+          fi
+
       # The Homebrew cask is pushed to abigotado/homebrew-tap, a different
       # repository, which the built-in GITHUB_TOKEN cannot write to at any
       # permission level — its scope ends at the repository containing this
@@ -86,7 +174,9 @@ jobs:
       # job on the same tag is the fix — replace_existing_artifacts and
       # replace_existing_draft are set for exactly that.
       - name: goreleaser release
-        run: goreleaser release --clean
+        # Unquoted on purpose: CASK_SKIP is either a flag or nothing, and
+        # quoting it would pass an empty argument goreleaser rejects.
+        run: goreleaser release --clean ${CASK_SKIP}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
