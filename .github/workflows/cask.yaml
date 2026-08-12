@@ -253,7 +253,22 @@ jobs:
                 exit 1
                 ;;
             esac
-            if ! curl -fsSL --retry 3 --retry-delay 2 -o "${tmp}" "${url}"; then
+            # The retry budget is sized for the window this workflow always
+            # runs inside, not for a flaky network. A release published seconds
+            # ago does not serve its own assets yet — publishing a draft re-keys
+            # them, and until that settles the download URL answers 503 or drops
+            # the connection mid-transfer. `release: published` fires
+            # immediately, so this step arrives inside that window every time.
+            # On v0.2.1 it lost the race at six seconds in and again at ninety,
+            # and the assets were servable by three minutes: --retry 3
+            # --retry-delay 2 spent its whole budget in the first six seconds of
+            # a three-minute wait. --retry-max-time is what expresses the wait,
+            # --retry-all-errors is what makes a dropped connection count as a
+            # reason to retry, and a genuinely absent asset costs that same five
+            # minutes before it is reported — which is the price of not failing
+            # every release on a race the trigger guarantees.
+            if ! curl -fsSL -o "${tmp}" \
+              --retry 100 --retry-delay 10 --retry-max-time 300 --retry-all-errors "${url}"; then
               echo "::error::cask URL does not resolve: ${url}"
               exit 1
             fi
