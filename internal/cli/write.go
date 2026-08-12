@@ -683,6 +683,10 @@ func (a *App) membersWriteCommands() []*cobra.Command {
 }
 
 func (a *App) commentsWriteCommands() []*cobra.Command {
+	return []*cobra.Command{a.commentAddCommand(), a.commentUpdateCommand()}
+}
+
+func (a *App) commentAddCommand() *cobra.Command {
 	var boardRef, cardRef objectRef
 	var text string
 	cmd := &cobra.Command{Use: "add", Short: "Add a comment to a card", Args: cobra.NoArgs}
@@ -690,7 +694,7 @@ func (a *App) commentsWriteCommands() []*cobra.Command {
 	cardRef.bind(cmd, "card", "card name, id, or shortLink")
 	cmd.Flags().StringVar(&text, "text", "", "comment body")
 
-	return []*cobra.Command{a.newCommand(requires(mutating(cmd), "card", "text"), func(ctx context.Context, _ *cobra.Command, _ []string) error {
+	return a.newCommand(requires(mutating(cmd), "card", "text"), func(ctx context.Context, _ *cobra.Command, _ []string) error {
 		if text == "" {
 			return errx.Usage("--text is required")
 		}
@@ -710,7 +714,58 @@ func (a *App) commentsWriteCommands() []*cobra.Command {
 			return err
 		}
 		return a.out.Success(commentView{comment})
-	})}
+	})
+}
+
+func (a *App) commentUpdateCommand() *cobra.Command {
+	var boardRef, cardRef objectRef
+	var commentID, text string
+	cmd := &cobra.Command{
+		Use:   "update",
+		Short: "Replace the text of a comment",
+		Long: "Replace the text of a comment.\n\n" +
+			"The comment is addressed by id, from 'comments list' — a comment has no\n" +
+			"name to resolve. The card is required as well, because it is part of\n" +
+			"Trello's route for this, and it doubles as a guard: a comment id from\n" +
+			"another card fails rather than editing the wrong comment.\n\n" +
+			"The text is replaced outright, so read the comment first unless you mean\n" +
+			"to discard it. Trello allows a member to edit only their own comments;\n" +
+			"editing anyone else's is refused as an auth error.",
+		Args: cobra.NoArgs,
+	}
+	boardRef.bind(cmd, "board", "board to resolve the card name within")
+	cardRef.bind(cmd, "card", "card name, id, or shortLink")
+	cmd.Flags().StringVar(&commentID, "comment-id", "", "comment id, from 'comments list'")
+	cmd.Flags().StringVar(&text, "text", "", "replacement comment body")
+
+	return a.newCommand(requires(mutating(cmd), "card", "comment-id", "text"), func(ctx context.Context, _ *cobra.Command, _ []string) error {
+		if commentID == "" {
+			return errx.Usage("--comment-id is required")
+		}
+		// An empty body is not how a comment is removed — Trello rejects it —
+		// so this is a mistake to report rather than a request to send.
+		if text == "" {
+			return errx.Usage("--text is required")
+		}
+		obj, err := a.cardAnywhere(ctx, boardRef, cardRef)
+		if err != nil {
+			return err
+		}
+		if a.dryRun {
+			return a.plan("comments update",
+				map[string]string{"card": obj.ID, "comment": commentID},
+				map[string]string{"text": text})
+		}
+		client, err := a.trelloClient(ctx)
+		if err != nil {
+			return err
+		}
+		comment, err := client.UpdateComment(ctx, obj.ID, commentID, text)
+		if err != nil {
+			return err
+		}
+		return a.out.Success(commentView{comment})
+	})
 }
 
 func (a *App) checklistsWriteCommands() []*cobra.Command {

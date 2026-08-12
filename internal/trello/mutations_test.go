@@ -137,6 +137,19 @@ func TestMutationsSendTheRightRequest(t *testing.T) {
 			wantQuery: map[string]string{"text": "hi"},
 		},
 		{
+			// The card is in the route, not just the comment id: Trello has no
+			// card-less edit here, and routing through the card is what makes a
+			// comment id from another card fail instead of applying.
+			name: "update comment goes through the card",
+			body: `{"id":"a1","date":"2026-01-01T00:00:00Z","data":{"text":"fixed"},"memberCreator":{"username":"nik"}}`,
+			call: func(c *Client) error {
+				_, err := c.UpdateComment(context.Background(), "c1", "a1", "fixed")
+				return err
+			},
+			wantMethod: http.MethodPut, wantPath: "/cards/c1/actions/a1/comments",
+			wantQuery: map[string]string{"text": "fixed"},
+		},
+		{
 			name:       "create checklist",
 			call:       func(c *Client) error { _, err := c.CreateChecklist(context.Background(), "c1", "Steps"); return err },
 			wantMethod: http.MethodPost, wantPath: "/checklists",
@@ -220,6 +233,36 @@ func TestUpdateSendsOnlySuppliedFields(t *testing.T) {
 	}
 	if rec.query.Get("name") != "Renamed" {
 		t.Errorf("name = %q", rec.query.Get("name"))
+	}
+}
+
+// Trello answers a comment write with the action envelope rather than a
+// comment, so the text sits at data.text and the author at
+// memberCreator.username. Flattening it wrongly returns a comment whose body is
+// blank, which reads as a comment that was written empty.
+func TestCommentWritesReturnTheFlattenedComment(t *testing.T) {
+	const body = `{"id":"a1","date":"2026-01-01T00:00:00Z","data":{"text":"fixed"},"memberCreator":{"username":"nik"}}`
+	tests := []struct {
+		name string
+		call func(*Client) (Comment, error)
+	}{
+		{"add", func(c *Client) (Comment, error) { return c.AddComment(context.Background(), "c1", "fixed") }},
+		{"update", func(c *Client) (Comment, error) { return c.UpdateComment(context.Background(), "c1", "a1", "fixed") }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv, _ := recordingServer(t, body)
+			c := New(srv.URL, Credentials{APIKey: "k", Token: "t"}, 1, WithHTTPClient(srv.Client()))
+
+			got, err := tt.call(c)
+			if err != nil {
+				t.Fatalf("call error = %v", err)
+			}
+			want := Comment{ID: "a1", Date: "2026-01-01T00:00:00Z", Text: "fixed", Author: "nik"}
+			if got != want {
+				t.Errorf("comment = %+v, want %+v", got, want)
+			}
+		})
 	}
 }
 

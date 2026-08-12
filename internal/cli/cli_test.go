@@ -1367,6 +1367,11 @@ func newWriteStub(t *testing.T) *writeStub {
 			_, _ = w.Write([]byte(`[{"id":"000000000000000000000010","name":"Doing"},{"id":"000000000000000000000011","name":"Done"}]`))
 		case r.URL.Path == "/boards/000000000000000000000001/cards":
 			_, _ = w.Write([]byte(`[{"id":"000000000000000000000020","name":"Ship it","idList":"000000000000000000000010"}]`))
+		case strings.HasSuffix(r.URL.Path, "/comments"):
+			// A comment write answers with the action envelope, not with a
+			// comment, so the generic body below would not exercise the
+			// flattening the caller sees.
+			_, _ = w.Write([]byte(`{"id":"a1","date":"2026-01-01T00:00:00Z","data":{"text":"fixed"},"memberCreator":{"username":"nik"}}`))
 		default:
 			_, _ = w.Write([]byte(`{"id":"000000000000000000000099","name":"created"}`))
 		}
@@ -1418,6 +1423,12 @@ func TestDryRunResolvesNamesAndSendsNoMutation(t *testing.T) {
 			args:       []string{"--dry-run", "lists", "create", "--board", "Roadmap", "--name", "Backlog"},
 			wantAction: "lists create",
 			wantTarget: map[string]string{"board": "000000000000000000000001"},
+		},
+		{
+			name:       "comments update",
+			args:       []string{"--dry-run", "comments", "update", "--board", "Roadmap", "--card", "Ship it", "--comment-id", "a1", "--text", "fixed"},
+			wantAction: "comments update",
+			wantTarget: map[string]string{"card": "000000000000000000000020", "comment": "a1"},
 		},
 		{
 			// --dry-run stands in for --yes on a destructive command, so a
@@ -1480,6 +1491,63 @@ func TestMutationsActuallySendWithoutDryRun(t *testing.T) {
 	}
 }
 
+// A comment has no name to resolve, so the edit is addressed by id — and by
+// the card, because that is Trello's route for it. Sending the comment id alone
+// would edit whatever comment it names, on whichever card holds it.
+func TestCommentUpdateEditsThroughTheCard(t *testing.T) {
+	stub := newWriteStub(t)
+	h := writeHarness(t, stub, nil)
+
+	if got := h.run("comments", "update",
+		"--card-id", "000000000000000000000020", "--comment-id", "a1", "--text", "fixed"); got != errx.CodeOK {
+		t.Fatalf("exit code = %d, want 0\nstdout: %s\nstderr: %s", got, h.out(), h.err())
+	}
+	want := "PUT /cards/000000000000000000000020/actions/a1/comments"
+	if len(stub.mutations) != 1 || stub.mutations[0] != want {
+		t.Errorf("sent %v, want [%s]", stub.mutations, want)
+	}
+	var env struct {
+		Data struct {
+			ID   string `json:"id"`
+			Text string `json:"text"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(h.out()), &env); err != nil {
+		t.Fatalf("bad envelope: %v\n%s", err, h.out())
+	}
+	// The edited body, read back from the response: an edit that reported the
+	// text it had sent would confirm nothing about what Trello stored.
+	if env.Data.ID != "a1" || env.Data.Text != "fixed" {
+		t.Errorf("data = %+v, want the edited comment", env.Data)
+	}
+}
+
+// Both are checked before anything is resolved or sent, because a half-given
+// edit has no safe interpretation: there is no comment to fall back to, and an
+// empty body is not how Trello removes one.
+func TestCommentUpdateRefusesAHalfGivenEdit(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{"no comment id", []string{"comments", "update", "--card-id", "000000000000000000000020", "--text", "fixed"}},
+		{"empty text", []string{"comments", "update", "--card-id", "000000000000000000000020", "--comment-id", "a1", "--text", ""}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stub := newWriteStub(t)
+			h := writeHarness(t, stub, nil)
+
+			if got := h.run(tt.args...); got != errx.CodeUsage {
+				t.Errorf("exit code = %d, want %d (usage)\nstdout: %s", got, errx.CodeUsage, h.out())
+			}
+			if len(stub.mutations) != 0 {
+				t.Errorf("an incomplete edit still sent %v", stub.mutations)
+			}
+		})
+	}
+}
+
 // Every mutating command must answer to read-only mode. Checking them as a set
 // is what catches the next one that forgets the annotation.
 func TestReadOnlyBlocksEveryMutatingCommand(t *testing.T) {
@@ -1496,6 +1564,7 @@ func TestReadOnlyBlocksEveryMutatingCommand(t *testing.T) {
 		{"members", "assign", "--board", "Roadmap", "--card", "Ship it", "--member", "nik"},
 		{"members", "unassign", "--board", "Roadmap", "--card", "Ship it", "--member", "nik"},
 		{"comments", "add", "--card-id", "c1", "--text", "hi"},
+		{"comments", "update", "--card-id", "c1", "--comment-id", "a1", "--text", "hi"},
 		{"checklists", "create", "--card-id", "c1", "--name", "Steps"},
 		{"checklists", "add-item", "--checklist-id", "cl1", "--name", "Step"},
 		{"checklists", "toggle", "--card-id", "c1", "--item-id", "i1"},

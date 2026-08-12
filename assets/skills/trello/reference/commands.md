@@ -312,6 +312,19 @@ Requires: `--card`
 | `--card` | string |  | card name, id, or shortLink |
 | `--limit` | int | `50` | maximum comments to return (1-1000) |
 
+### `trello-cli comments update`  **W**
+
+Replace the text of a comment
+
+Requires: `--card`, `--comment-id`, `--text`
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--board` | string |  | board to resolve the card name within |
+| `--card` | string |  | card name, id, or shortLink |
+| `--comment-id` | string |  | comment id, from 'comments list' |
+| `--text` | string |  | replacement comment body |
+
 ### `trello-cli contract`
 
 Print the machine contract: envelope version and exit codes
