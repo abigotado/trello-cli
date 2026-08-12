@@ -252,22 +252,38 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          # The listing endpoint rather than `gh release view` because this needs
-          # the draft flag of every release carrying the tag, not one release.
-          # GitHub allows a draft and a published release to share a tag_name, so
-          # the answer is read as "is any of them public" rather than compared as
-          # a single value. (`gh release view` would find the draft — it falls
-          # back to a draft lookup on a 404, which is why the upload step above
-          # works on one — it just answers about a single release.)
-          states=$(gh api "repos/${GITHUB_REPOSITORY}/releases" --paginate \
-            --jq '.[] | select(.tag_name == env.RELEASE_TAG) | .draft')
-          if [ -z "${states}" ]; then
-            echo "::error::no release found for ${RELEASE_TAG} after goreleaser reported success"
+          # `gh release view`, not the listing endpoint. Listing every release and
+          # reading the draft flag of the ones carrying the tag is what this used
+          # to do, and on v0.2.1 that listing came back empty under GITHUB_TOKEN —
+          # two seconds after the step above had uploaded an asset to the very
+          # draft it did not contain. The release was fine; the step failed it.
+          #
+          # This asks the one path that is known to work with this token, because
+          # the upload above already depends on it: gh looks the tag up, and on
+          # the 404 that a draft answers with, falls back to a draft lookup. So a
+          # failure here means no release at all, and isDraft answers the rest.
+          #
+          # It also answers "is any release carrying this tag public" correctly
+          # when a draft and a published release share a tag_name, which GitHub
+          # allows: the tag lookup returns the published one, and only its
+          # absence falls through to the draft.
+          if ! draft=$(gh release view "${RELEASE_TAG}" --json isDraft --jq .isDraft 2>&1); then
+            echo "::error::no release found for ${RELEASE_TAG} after goreleaser reported success. gh said: ${draft}"
             exit 1
           fi
-          if ! printf '%s\n' "${states}" | grep -qx false; then
-            echo "${RELEASE_TAG} is a draft; publishing it is what pushes the cask"
-            exit 0
-          fi
+          # Neither answer is assumed from the absence of the other. A value
+          # that is neither is a gh or API change, and reading it as "draft"
+          # would skip the dispatch silently — the one outcome nobody sees.
+          case "${draft}" in
+            true)
+              echo "${RELEASE_TAG} is a draft; publishing it is what pushes the cask"
+              exit 0
+              ;;
+            false) ;;
+            *)
+              echo "::error::gh reported isDraft='${draft}' for ${RELEASE_TAG}, which is neither true nor false"
+              exit 1
+              ;;
+          esac
           gh workflow run cask.yaml --ref "${{ github.event.repository.default_branch }}" -f tag="${RELEASE_TAG}"
           echo "${RELEASE_TAG} is already public; dispatched the cask workflow"
