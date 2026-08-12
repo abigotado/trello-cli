@@ -1,0 +1,352 @@
+name: cask
+
+# Pushes the Homebrew cask, separately from the release that carries the
+# artifacts it points at.
+#
+# Both used to happen in one `goreleaser release` run: it created a *draft*
+# release and pushed the cask to abigotado/homebrew-tap in the same breath, and
+# a cask's download URLs 404 for as long as the release is a draft — so
+# `brew install` was broken for the whole window between the tag and a human
+# clicking Publish. On v0.2.0 that was 54 minutes (release created 11:51Z,
+# published 12:45Z). Nothing but "publish promptly" stood between that and a
+# user hitting it.
+#
+# So the cask waits for the release to be public. goreleaser still generates it
+# — .goreleaser.yaml sets skip_upload: "true" — and the release workflow attaches
+# it to the release as trello-cli.rb. This workflow pushes that exact file.
+#
+# It deliberately does not rebuild to regenerate the cask. Verified by rebuilding
+# v0.2.0 and diffing against the published assets: every archive checksum
+# differs, because LICENSE, README.md and docs/* carry the mtime of the checkout
+# they were archived from and a fresh runner checkout stamps a new one every
+# time. The binary inside is bit-identical; the tar around it is not. A
+# regenerated cask would advertise checksums matching nothing that was uploaded,
+# and `brew install` would fail on a checksum mismatch instead of a 404.
+#
+# Most of the ways this can go wrong resolve themselves:
+#   - the tag is not the newest stable one, so the release job held the cask back
+#     and this workflow's gate reaches the same answer and skips, green;
+#   - the draft was published while the release job was still running, so the
+#     webhook-fired run finds no cask asset and fails — and then that job's last
+#     step sees a release that is no longer a draft and dispatches this workflow
+#     again, which succeeds;
+#   - the release was already public when the release job ran, which is the same
+#     dispatch.
+# The case that does need a human: a release job that died after creating the
+# release but before attaching the cask or dispatching. Then nothing has run and
+# nothing will. Re-run the release job, or dispatch this workflow once the cask
+# asset is attached.
+#
+# And one state this cannot get itself out of: deleting a released tag together
+# with its release. The tap then advertises URLs that 404, and the refusal to
+# move the cask backwards means no older tag can replace it — every run goes red
+# until someone pushes to abigotado/homebrew-tap by hand. That is the right
+# trade against a silent backwards move, but it is a trap worth knowing about
+# before deleting a release that `brew install` is pointing at.
+
+on:
+  release:
+    types: [published]
+  # Publishing a draft fires `published`. It is the only type that covers this:
+  # a draft being *created* fires nothing, and `prereleased` does not fire for a
+  # prerelease published from a draft, while `published` does. But only a human
+  # or a PAT can fire it — an event triggered by the built-in GITHUB_TOKEN never
+  # starts a workflow run, which is why release.yaml dispatches this workflow
+  # itself when it finds the release already public.
+  #
+  # The dispatch is also the way back in when the webhook is dropped, the same
+  # reason release.yaml has one. Note the asymmetry between the two triggers:
+  # a `release` event runs this file as it exists at the released tag, while
+  # workflow_dispatch exists only for the copy on the default branch and runs
+  # that one. Everything below is pinned to RELEASE_TAG for that reason.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Published release to push the cask for, e.g. v0.1.6"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+# Keyed on the tag, and it has to be. A group holds at most one *pending* run and
+# cancels it when a third arrives, so one group covering every tag loses runs:
+# publish v0.3.0, v0.3.2, v0.3.1 in quick succession and v0.3.2's run is the one
+# cancelled while the other two correctly decline to move the cask backwards —
+# the newest cask never reaches the tap, and all of it reads as green plus one
+# cancelled run. Per tag, no run can cancel another tag's.
+#
+# What then makes two overlapping tags safe is not serialisation but the two
+# checks at the end: the gate lets only the newest stable tag through, the push
+# refuses to lower the version the tap already carries, and a checkout that went
+# stale meanwhile is rejected non-fast-forward by `git push`. The worst case is a
+# red job, never a wrong cask.
+#
+# cancel-in-progress stays false: killing a run part-way through a push is the
+# outcome this exists to prevent, not an acceptable way to reach it.
+concurrency:
+  group: homebrew-tap-${{ github.event.release.tag_name || inputs.tag }}
+  cancel-in-progress: false
+
+# The tag being released, whichever way the run started. On a release event
+# github.event.release.tag_name is that tag; on a manual run inputs.tag is the
+# one named.
+#
+# GH_REPO is not optional here. This job never checks this repository out — the
+# only checkout is the tap, under tap/ — so `gh` has no git remote to infer a
+# repository from and every `gh release` call fails with "none of the git
+# remotes point to a known host". Verified by running the steps outside a
+# checkout. It is also what stops a `gh release` call from resolving against
+# the tap once that checkout exists.
+env:
+  RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+  GH_REPO: ${{ github.repository }}
+
+jobs:
+  cask:
+    name: Push the Homebrew cask
+    runs-on: ubuntu-latest
+    steps:
+      # A dispatch can name any published release, an old one included, and
+      # unpublishing a release and publishing it again re-fires this workflow
+      # for a tag that may no longer be the newest. Either would move what
+      # `brew install` resolves to backwards.
+      #
+      # This is also what holds an -rc tag back now that .goreleaser.yaml no
+      # longer says skip_upload: "auto": an -rc tag fails the stable-only match
+      # below, so it can never be the newest stable tag. The gate is load-bearing
+      # for all three cases, not just the first.
+      #
+      # Tags come from the API rather than a checkout. The cask comes from the
+      # release, not from this repository's tree, so a full-history checkout
+      # would buy nothing and would park a source tree next to a cross-repo
+      # write credential.
+      - name: Decide whether the cask may move
+        id: gate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Fetched on its own line, deliberately. `|| true` binds to a whole
+          # pipeline, not to the grep in it, so folding these together would
+          # swallow a failed or half-paginated API call and hand the filter an
+          # empty list — a rate-limited gate would then "decide" to skip and the
+          # job would end green, which is the silent staleness this workflow
+          # exists to prevent. An API failure must fail the job.
+          tags=$(gh api "repos/${GITHUB_REPOSITORY}/tags" --paginate --jq '.[].name')
+          # Here `|| true` is right: grep exits 1 when nothing matches, and
+          # having no stable tag yet is a legitimate skip rather than a failure.
+          # That path is reachable — an -rc release published in a repository
+          # whose first stable tag does not exist.
+          latest=$(printf '%s\n' "${tags}" \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1 || true)
+          # If this run is releasing a stable tag, that tag has to be in the list
+          # it just fetched — it is being released, so it exists. An empty answer
+          # then means the listing was wrong, not that there is nothing to do,
+          # and guessing from it is how a truncated page turns into a skip.
+          if [ -z "${latest}" ] && printf '%s' "${RELEASE_TAG}" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::${RELEASE_TAG} is a stable tag but the tag listing contained no stable tag; refusing to guess"
+            exit 1
+          fi
+          if [ "${RELEASE_TAG}" = "${latest}" ]; then
+            echo "move=true" >> "$GITHUB_OUTPUT"
+            echo "${RELEASE_TAG} is the newest stable tag; the cask moves with it"
+          else
+            echo "move=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::${RELEASE_TAG} is not the newest stable tag (${latest:-none}); leaving the Homebrew cask alone"
+          fi
+
+      - name: Assert the release is published
+        if: steps.gate.outputs.move == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # contents: read cannot see drafts — the REST tag lookup returns only
+          # published releases, and draft listings need push access — so "no
+          # such release" and "still a draft" are the same answer here. They
+          # also mean the same thing: there is nothing a Homebrew user could
+          # download yet, so there is nothing to advertise.
+          # Keeping stderr means a rate limit or a network fault does not get
+          # reported as "still a draft".
+          if ! err=$(gh release view "${RELEASE_TAG}" --json tagName 2>&1 >/dev/null); then
+            echo "::error::no published release for ${RELEASE_TAG} (a draft is invisible at contents: read). Publish it, then re-run this workflow. gh said: ${err}"
+            exit 1
+          fi
+
+      - name: Download the cask from the release
+        if: steps.gate.outputs.move == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if ! gh release download "${RELEASE_TAG}" --pattern trello-cli.rb --dir cask; then
+            echo "::error::${RELEASE_TAG} carries no trello-cli.rb asset. Either the release workflow held the cask back (CASK_SKIP, when the tag is not the newest stable one), or the draft was published while that job was still running and it had not attached the cask yet. Re-run this workflow once the release workflow is green."
+            exit 1
+          fi
+
+      # The rail against the defect this workflow exists for. Everything above
+      # reasons about *when* the assets should be reachable; this fetches them.
+      # The cask reaches the tap only if every URL a Homebrew user will fetch
+      # already returns 200 and already hashes to what the cask claims.
+      #
+      # Both halves earn their place: a 404 is the original defect, and a 200
+      # with different bytes is what a rebuilt or re-uploaded set of archives
+      # would produce. Homebrew fails just as hard on either.
+      - name: Verify every URL in the cask
+        if: steps.gate.outputs.move == 'true'
+        run: |
+          set -euo pipefail
+          # Homebrew interpolates the cask's own version stanza into #{version},
+          # not the tag this run was handed, so read it from the cask — that is
+          # what makes these the URLs a user will really fetch — and assert the
+          # two agree. A divergence would otherwise surface as a checksum
+          # mismatch with a message pointing at the wrong thing.
+          version=$(sed -n 's/^[[:space:]]*version "\([^"]*\)".*/\1/p' cask/trello-cli.rb | head -1)
+          if [ -z "${version}" ]; then
+            echo "::error::the cask carries no version stanza — refusing to push it"
+            exit 1
+          fi
+          if [ "${version}" != "${RELEASE_TAG#v}" ]; then
+            echo "::error::the cask is for ${version} but this run is releasing ${RELEASE_TAG}"
+            exit 1
+          fi
+          # sha256 and url come in pairs, sha256 first, one pair per platform
+          # block.
+          pairs=$(awk '
+            /^[[:space:]]*sha256 "/ { sha = $0; sub(/.*sha256 "/, "", sha); sub(/".*/, "", sha) }
+            /^[[:space:]]*url "/    { url = $0; sub(/.*url "/, "", url);    sub(/".*/, "", url)
+                                      print sha "\t" url }
+          ' cask/trello-cli.rb)
+
+          if [ -z "${pairs}" ]; then
+            echo "::error::no url stanzas found in the cask — refusing to push it"
+            exit 1
+          fi
+          # Count the sha256 stanzas independently of the awk above, and compare
+          # at the end. Without it the awk silently sets its own coverage: a url
+          # written in a shape it does not match — goreleaser already emits a
+          # `url "…",` continuation form for verified/using — would be dropped
+          # and the step would pass having checked fewer URLs than ship.
+          want=$(grep -cE '^[[:space:]]*sha256 "' cask/trello-cli.rb)
+
+          # Every URL must be an asset of this release. The cask travels as a
+          # release asset, and release assets can be replaced at any time — the
+          # draft sitting open for review is exactly that window. Without this, a
+          # substituted cask pointing at another host would verify perfectly
+          # against its own bytes and be pushed to the tap.
+          prefix="https://github.com/${GH_REPO}/releases/download/${RELEASE_TAG}/"
+
+          tmp=$(mktemp)
+          trap 'rm -f "${tmp}"' EXIT
+          count=0
+          while IFS=$'\t' read -r sha template; do
+            # The cask carries Ruby interpolation, not a URL. Homebrew resolves
+            # #{version} at install time; this has to resolve it to fetch the
+            # same bytes. -L is load-bearing: a release asset answers 302 and
+            # the object lives on another host.
+            url=${template//'#{version}'/$version}
+            case "${url}" in
+              "${prefix}"*) ;;
+              *)
+                echo "::error::cask URL is not an asset of ${RELEASE_TAG}: ${url}"
+                exit 1
+                ;;
+            esac
+            if ! curl -fsSL --retry 3 --retry-delay 2 -o "${tmp}" "${url}"; then
+              echo "::error::cask URL does not resolve: ${url}"
+              exit 1
+            fi
+            got=$(sha256sum "${tmp}" | cut -d' ' -f1)
+            if [ "${got}" != "${sha}" ]; then
+              echo "::error::cask sha256 does not match the published asset at ${url} (cask ${sha}, asset ${got})"
+              exit 1
+            fi
+            count=$((count + 1))
+            echo "ok ${url}"
+          done <<<"${pairs}"
+
+          if [ "${count}" != "${want}" ]; then
+            echo "::error::verified ${count} URLs but the cask declares ${want} sha256 stanzas — something in it was not checked"
+            exit 1
+          fi
+          echo "${count} cask URLs resolve and match their sha256"
+
+      # A different repository, which the built-in GITHUB_TOKEN cannot write to
+      # at any permission level — its scope ends at the repository containing
+      # this workflow, and being the same owner does not help. HOMEBREW_TAP_TOKEN
+      # is a fine-grained PAT scoped to the tap alone, and this is the only job
+      # that holds it.
+      #
+      # persist-credentials is the default and is required here: the push below
+      # uses it. actions/checkout keeps the token in an http.extraheader rather
+      # than in the remote URL, so it cannot surface in a logged URL. Nothing
+      # else runs from this checkout, and this repository is never checked out
+      # beside it.
+      - name: Check out the tap
+        if: steps.gate.outputs.move == 'true'
+        uses: actions/checkout@v7
+        with:
+          repository: abigotado/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          persist-credentials: true
+          path: tap
+
+      - name: Push the cask to the tap
+        if: steps.gate.outputs.move == 'true'
+        working-directory: tap
+        run: |
+          set -euo pipefail
+          # An absent file reads as an empty version rather than an error: a tap
+          # that does not carry this cask yet is the first-push case, and it
+          # should push, not die in sed. An unreadable *incoming* cask reads
+          # empty too and is refused by the comparison below, which is the right
+          # way round.
+          read_version() {
+            [ -f "$1" ] || return 0
+            sed -n 's/^[[:space:]]*version "\([^"]*\)".*/\1/p' "$1" | head -1
+          }
+          current=$(read_version Casks/trello-cli.rb)
+          incoming=$(read_version ../cask/trello-cli.rb)
+
+          # The tap's own cask is the only thing that can answer "is this a step
+          # backwards", so ask it rather than trusting the ordering of two
+          # workflow runs. Equal versions pass on purpose: that is how a
+          # re-uploaded set of artifacts — same version, new checksums — reaches
+          # the tap.
+          #
+          # Compared on the stable core, with any prerelease suffix stripped,
+          # because `sort -V` is not semver: it ranks 0.3.0-rc.1 *above* 0.3.0.
+          # Left alone, an rc that ever reached the tap would make this refuse
+          # every later stable release and wedge the tap with a red job no re-run
+          # could clear. Keeping prereleases out in the first place is the gate's
+          # job, not this comparison's — this only has to answer "backwards".
+          core_current=${current%%-*}
+          core_incoming=${incoming%%-*}
+          if [ "${core_current}" != "${core_incoming}" ] &&
+             [ "$(printf '%s\n%s\n' "${core_current}" "${core_incoming}" | sort -V | tail -1)" = "${core_current}" ]; then
+            echo "::error::the tap already carries ${current}, which is newer than ${incoming}; refusing to move the cask backwards"
+            exit 1
+          fi
+
+          # mkdir because a tap that carries no cask carries no Casks/ either —
+          # git does not track empty directories — and that is exactly the
+          # first-push case the version read above allows through.
+          mkdir -p Casks
+          install -m 644 ../cask/trello-cli.rb Casks/trello-cli.rb
+          # Staged before the comparison on purpose: `git diff` does not see an
+          # untracked file, so on a tap that does not carry this cask yet it
+          # would report no change and this step would exit 0 having pushed
+          # nothing.
+          git add Casks/trello-cli.rb
+          if git diff --cached --quiet; then
+            echo "the tap already carries this exact cask; nothing to push"
+            exit 0
+          fi
+          # The subject goreleaser's cask pipe used, kept so the tap history
+          # reads the same either side of this change.
+          git -c user.name='github-actions[bot]' \
+              -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+              commit -m "Brew cask update for trello-cli version ${RELEASE_TAG}"
+          git push
+          echo "pushed the cask for ${RELEASE_TAG}"

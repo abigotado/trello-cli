@@ -17,9 +17,11 @@ on:
         type: string
 
 # The repository default for GITHUB_TOKEN is read-only, so the release job must
-# opt in. contents: write is the whole requirement — it covers creating the
-# release and uploading assets. Declaring permissions resets every other scope
-# to none, which is what we want: no packages, no id-token, no discussions.
+# opt in. It asks for two scopes and no others: contents: write, which covers
+# creating the release and uploading assets, and actions: write, which is only
+# there so the last step can dispatch the cask workflow — see the job below.
+# Declaring permissions resets every other scope to none, which is what we want:
+# no packages, no id-token, no discussions.
 permissions:
   contents: read
 
@@ -52,6 +54,13 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      # Only the last step uses this, for `gh workflow run` — workflow_dispatch
+      # is one of the two events GITHUB_TOKEN may trigger, which is what lets
+      # the cask workflow be started without a PAT. Permissions are job-scoped,
+      # though, so every step here runs with it. Narrowing it further would mean
+      # splitting the dispatch into its own job with CASK_SKIP as an output,
+      # which buys little next to the contents: write this job already needs.
+      actions: write
     steps:
       - name: Git Checkout
         # fetch-depth: 0 is mandatory. The default shallow fetch leaves
@@ -135,25 +144,38 @@ jobs:
       - name: goreleaser check
         run: goreleaser check
 
-      # A dispatch can name any tag that exists, an old one included, and
-      # goreleaser would then push a cask for that version and move what
-      # `brew install` resolves to backwards. skip_upload: "auto" in
-      # .goreleaser.yaml does not cover this — it keys off prerelease, and an
-      # old stable tag is not a prerelease. Worse, release.draft means the cask
-      # can end up pointing at assets that 404 until someone publishes.
+      # A dispatch can name any tag that exists, an old one included, and the
+      # cask generated for it would move what `brew install` resolves to
+      # backwards. skip_upload in .goreleaser.yaml does not cover this — it used
+      # to key off prerelease, and an old stable tag is not a prerelease.
       #
       # Re-running an old tag is legitimate, though: the goreleaser config is
       # written around it, replace_existing_artifacts and all. So the run
       # proceeds and only the cask is held back. Verified that --skip=homebrew
       # covers homebrew_casks: with it, dist/homebrew/Casks is never written.
+      #
+      # What this decides is now whether the cask is *generated and attached*,
+      # not whether it is pushed — nothing here pushes to the tap any more. The
+      # cask workflow re-derives the same answer before it pushes, so an old tag
+      # is held back by two independent rails: there is no asset for it to find,
+      # and it would refuse the asset if there were.
       - name: Decide whether the cask may move
         run: |
           set -euo pipefail
-          # Stable tags only, matching the prerelease: auto the cask already
-          # follows, and version order rather than string order so v0.1.10
-          # outranks v0.1.9.
-          latest=$(git tag --list 'v*' --sort=-version:refname \
-            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
+          # Stable tags only, matching release.prerelease: auto, and version
+          # order rather than string order so v0.1.10 outranks v0.1.9. The cask
+          # workflow runs the same match for the same reason; it is what holds
+          # an -rc tag back now that skip_upload no longer says "auto".
+          #
+          # Listed first, filtered second, so `|| true` covers only the grep.
+          # grep exits 1 when nothing matches, and folded into one pipeline that
+          # would abort this job under pipefail — releasing an -rc from a
+          # repository with no stable tag yet is a skip, not a failure. Written
+          # the same way in cask.yaml, which needs the split more: its tag list
+          # comes from a paginated API call that can genuinely fail.
+          tags=$(git tag --list 'v*' --sort=-version:refname)
+          latest=$(printf '%s\n' "${tags}" \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1 || true)
           if [ "${RELEASE_TAG}" = "${latest}" ]; then
             echo "CASK_SKIP=" >> "$GITHUB_ENV"
             echo "${RELEASE_TAG} is the newest stable tag; the cask moves with it"
@@ -162,21 +184,90 @@ jobs:
             echo "::warning::${RELEASE_TAG} is not the newest stable tag (${latest:-none}); leaving the Homebrew cask alone"
           fi
 
-      # The Homebrew cask is pushed to abigotado/homebrew-tap, a different
-      # repository, which the built-in GITHUB_TOKEN cannot write to at any
-      # permission level — its scope ends at the repository containing this
-      # workflow. HOMEBREW_TAP_TOKEN is a fine-grained PAT scoped to that tap
-      # and nothing else.
-      #
-      # Ordering matters if it is ever missing or expired: goreleaser creates
-      # the GitHub release before it pushes the cask, so a token failure leaves
-      # a complete release with no cask rather than no release. Re-running this
-      # job on the same tag is the fix — replace_existing_artifacts and
-      # replace_existing_draft are set for exactly that.
+      # This job does not hold a tap credential. skip_upload: "true" in
+      # .goreleaser.yaml means the run writes dist/homebrew/Casks/trello-cli.rb
+      # and never contacts abigotado/homebrew-tap, so HOMEBREW_TAP_TOKEN — a
+      # fine-grained PAT with write access to another repository — belongs to
+      # .github/workflows/cask.yaml alone. Verified against goreleaser v2.17.1
+      # with publishing enabled against a stub API: with the token absent from
+      # the environment the run still succeeds and makes zero requests to the
+      # tap.
       - name: goreleaser release
-        # Unquoted on purpose: CASK_SKIP is either a flag or nothing, and
-        # quoting it would pass an empty argument goreleaser rejects.
-        run: goreleaser release --clean ${CASK_SKIP}
+        run: |
+          # Unquoted on purpose: CASK_SKIP is either a flag or nothing, and
+          # quoting it would pass goreleaser an empty argument it rejects. The
+          # suppression lives here rather than in a lint config so the reason
+          # sits on the line it excuses.
+          # shellcheck disable=SC2086
+          goreleaser release --clean ${CASK_SKIP}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+
+      # The cask that reaches the tap is this file, byte for byte, and it cannot
+      # be regenerated later. Verified by rebuilding v0.2.0 and diffing against
+      # the published assets: every archive checksum differs, because LICENSE,
+      # README.md and docs/* carry the mtime of the checkout they were archived
+      # from and a fresh runner checkout stamps a new one each run. The binary
+      # inside is bit-identical; the tar around it is not. So the cask travels
+      # as an artifact rather than being rebuilt — a regenerated one would
+      # advertise checksums that do not match the assets, and `brew install`
+      # would fail on a checksum mismatch instead of a 404.
+      #
+      # Attaching it here also puts it in the artifact list that gets reviewed
+      # before the draft is published: the cask is now part of what is being
+      # approved. It is not listed in the checksums file and cannot be —
+      # goreleaser computes checksums before the cask pipe writes it. That costs
+      # nothing: `shasum -c` only checks the files the checksums file names, so
+      # an unlisted one beside them changes no verification either way. It does
+      # mean the release carries one asset a user cannot verify, which is the
+      # reason not to treat it as a download — it is the tap's input.
+      - name: Attach the cask to the release
+        if: env.CASK_SKIP == ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # --clobber for the same reason as replace_existing_artifacts: a
+          # re-run of an immutable tag must not trip over what the first
+          # attempt already uploaded.
+          gh release upload "${RELEASE_TAG}" dist/homebrew/Casks/trello-cli.rb --clobber
+          echo "attached the cask for ${RELEASE_TAG}"
+
+      # Publishing the draft is what fires the cask workflow. A release that is
+      # already published when this job runs fires nothing — and that case is
+      # reachable: re-running this job against a published release re-uploads
+      # the archives (replace_existing_artifacts), and those rebuilt archives
+      # have different checksums, so the cask sitting in the tap would be left
+      # advertising checksums that no longer match anything. Dispatch the cask
+      # workflow explicitly rather than leaving that to be noticed.
+      #
+      # workflow_dispatch is one of the two events the built-in GITHUB_TOKEN is
+      # allowed to trigger, so this needs no PAT — only actions: write above.
+      # --ref names the default branch because workflow_dispatch only exists for
+      # workflow files on it; that copy pins everything it reads to the tag it
+      # is given, so which branch it runs from does not change what it pushes.
+      - name: Dispatch the cask workflow if the release is already public
+        if: env.CASK_SKIP == ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # The listing endpoint rather than `gh release view` because this needs
+          # the draft flag of every release carrying the tag, not one release.
+          # GitHub allows a draft and a published release to share a tag_name, so
+          # the answer is read as "is any of them public" rather than compared as
+          # a single value. (`gh release view` would find the draft — it falls
+          # back to a draft lookup on a 404, which is why the upload step above
+          # works on one — it just answers about a single release.)
+          states=$(gh api "repos/${GITHUB_REPOSITORY}/releases" --paginate \
+            --jq '.[] | select(.tag_name == env.RELEASE_TAG) | .draft')
+          if [ -z "${states}" ]; then
+            echo "::error::no release found for ${RELEASE_TAG} after goreleaser reported success"
+            exit 1
+          fi
+          if ! printf '%s\n' "${states}" | grep -qx false; then
+            echo "${RELEASE_TAG} is a draft; publishing it is what pushes the cask"
+            exit 0
+          fi
+          gh workflow run cask.yaml --ref "${{ github.event.repository.default_branch }}" -f tag="${RELEASE_TAG}"
+          echo "${RELEASE_TAG} is already public; dispatched the cask workflow"

@@ -165,7 +165,7 @@ think one has already leaked.
 
 | Workflow | Check | Enforces |
 | --- | --- | --- |
-| `go` | Build and test | `gofmt`, `go vet`, `go build`, `go test -race`, `goreleaser check`, and that `go generate` produces no diff |
+| `go` | Build and test | `gofmt`, `go vet`, `go build`, `go test -race`, `goreleaser check`, `actionlint` with shellcheck over `.github/workflows`, and that `go generate` produces no diff |
 | `agent harness` | Harness consistency | `.claude/`/`.codex/` stay untracked, Cursor mirrors are in sync, harness unit tests pass |
 
 Both are required to merge into `main`. If you contribute from a fork, the
