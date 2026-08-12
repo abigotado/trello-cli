@@ -17,20 +17,42 @@ allow = [
   "Bash(golangci-lint run:*)",
   "Bash(python3 .agents/scripts/sync-rules.py --check:*)",
   "Bash(python3 -m unittest discover -s .agents/tests:*)",
+  # Downloads into the module cache. Unlike `go mod tidy` it does not touch
+  # go.mod or go.sum — that distinction is the reason .goreleaser.yaml's
+  # before-hook uses `download`, since tidy would dirty the tree mid-release.
+  "Bash(go mod download:*)",
+  # Regenerates docs/contract.md and the skills reference from internal/errx.
+  # Running it is how a contributor clears the CI check that regenerating
+  # produces no diff, and whatever it writes shows up in `git diff` regardless.
+  "Bash(go generate:*)",
+  # How this repository gets its pinned tooling: both workflows install
+  # goreleaser and actionlint with exactly this command.
+  "Bash(go install:*)",
+  # Local and reversible, and a commit still passes the hook that keeps agent
+  # and provider names out of published Git metadata. Sending it anywhere is
+  # `git push`, which stays in `ask` below.
+  "Bash(git commit:*)",
+  # Running the gate is reading: gofmt, vet, build, test. Only `install` and
+  # `uninstall`, which mutate local Git config, stay in `ask`.
+  "Bash(.githooks/pre-push:*)",
 ]
 
+# `ask` is the only list that survives every permission mode. An entry here
+# prompts in auto mode and in bypassPermissions alike, where `allow`, `deny` and
+# the auto-mode classifier all behave differently. That makes it the expensive
+# list, so it holds what is worth stopping a session for and nothing that merely
+# has a side effect — a prompt spent on something `git checkout` undoes is a
+# prompt not read carefully when it matters.
 ask = [
-  # Mutates go.mod/go.sum and reaches the network for module downloads.
+  # Rewrites go.mod and go.sum. AGENTS.md keeps dependency changes out of a
+  # feature change unless the accepted plan includes them.
   "Bash(go mod tidy:*)",
-  "Bash(go mod download:*)",
   "Bash(go get:*)",
-  "Bash(go generate:*)",
-  "Bash(go install:*)",
-  "Bash(git commit:*)",
+  # Publication, and the last point before a change leaves the machine. A tag
+  # the module proxy has seen cannot be taken back.
   "Bash(git push:*)",
   # `install` and `uninstall` mutate local Git config and are the developer's
   # call, never the agent's — see .agents/rules/quality-gates.md.
-  "Bash(.githooks/pre-push:*)",
   "Bash(.githooks/install:*)",
   "Bash(.githooks/uninstall:*)",
 ]
