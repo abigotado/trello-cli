@@ -160,12 +160,23 @@ func (c *Client) AddComment(ctx context.Context, cardID, text string) (Comment, 
 	if err := c.Post(ctx, "cards/"+url.PathEscape(cardID)+"/actions/comments", q, &action); err != nil {
 		return Comment{}, err
 	}
-	return Comment{
-		ID:     action.ID,
-		Date:   action.Date,
-		Text:   action.Data.Text,
-		Author: action.MemberCreator.Username,
-	}, nil
+	return action.comment(), nil
+}
+
+// UpdateComment replaces the text of a comment on a card.
+//
+// The card is in Trello's route for this rather than incidental to it, and that
+// is worth keeping: a comment id belonging to a different card fails here
+// instead of quietly rewriting a comment somewhere else. Trello refuses an edit
+// to a comment written by another member, which arrives as an auth error.
+func (c *Client) UpdateComment(ctx context.Context, cardID, commentID, text string) (Comment, error) {
+	q := url.Values{"text": {text}}
+	var action commentAction
+	path := "cards/" + url.PathEscape(cardID) + "/actions/" + url.PathEscape(commentID) + "/comments"
+	if err := c.Put(ctx, path, q, &action); err != nil {
+		return Comment{}, err
+	}
+	return action.comment(), nil
 }
 
 // CreateChecklist adds a checklist to a card.

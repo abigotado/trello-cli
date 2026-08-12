@@ -145,7 +145,7 @@ to discard it.
   Generated from the binary.
 - `trello-cli contract` prints the same exit-code table as JSON at runtime.
 
-Four traps the reference will not shout at you about.
+Five traps the reference will not shout at you about.
 
 Move a card between lists with `cards move`, not `cards update`.
 
@@ -169,3 +169,11 @@ label being created for you. Check `labels list` first; `labels create --board X
 --name Blocked --color red` defines a new one. Colours are Trello's — a wrong
 one comes back as exit 2 naming the flag, and `labels list` shows what the board
 already uses.
+
+**`comments update` edits your own comments only.** It takes `--comment-id` from
+`comments list` and the card the comment sits on, and it replaces the body
+outright — there is no append, so read the comment before rewriting it. Trello
+refuses an edit to another member's comment as a permission failure, and
+permission failures arrive here as exit 5. On a comment whose `author` is not
+the username `trello-cli me` reports, that 5 is not about your credentials and
+re-authenticating will not fix it: say who owns the comment and stop.

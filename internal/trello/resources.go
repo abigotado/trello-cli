@@ -97,6 +97,18 @@ type commentAction struct {
 	} `json:"memberCreator"`
 }
 
+// comment flattens the wire shape. Every route that returns a commentCard
+// action — the listing, the post, the edit — hands back the same envelope, so
+// the flattening lives here rather than three times over.
+func (a commentAction) comment() Comment {
+	return Comment{
+		ID:     a.ID,
+		Date:   a.Date,
+		Text:   a.Data.Text,
+		Author: a.MemberCreator.Username,
+	}
+}
+
 // Activity is a createCard action or a list-to-list move (an updateCard
 // action that changed idList) on a board.
 //
@@ -418,12 +430,7 @@ func (c *Client) Comments(ctx context.Context, cardID string, page Page) ([]Comm
 	}
 	comments := make([]Comment, 0, len(actions))
 	for _, a := range actions {
-		comments = append(comments, Comment{
-			ID:     a.ID,
-			Date:   a.Date,
-			Text:   a.Data.Text,
-			Author: a.MemberCreator.Username,
-		})
+		comments = append(comments, a.comment())
 	}
 	return comments, nil
 }
