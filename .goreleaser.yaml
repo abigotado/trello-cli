@@ -71,18 +71,40 @@ homebrew_casks:
     binaries: [trello-cli]
     homepage: https://github.com/abigotado/trello-cli
     description: Manage Trello from the command line, or from an AI agent shelling out to it
-    # Matches release.prerelease below: an -rc tag should not move what
-    # `brew install` resolves to.
-    skip_upload: "auto"
+    # goreleaser writes this cask; it never pushes it. The push lives in
+    # .github/workflows/cask.yaml and waits for the GitHub release to be
+    # published, because the url fields below 404 for as long as the release is
+    # a draft — see the note on release.draft.
+    #
+    # Verified against goreleaser v2.17.1 with publishing fully enabled against
+    # a stub API: skip_upload is read in the publish stage, after the run stage
+    # has already written dist/homebrew/Casks/trello-cli.rb, and the early
+    # return happens before repository.token is resolved. The file is produced
+    # and the tap is not contacted at all.
+    #
+    # This replaces skip_upload: "auto", which held the cask back for -rc tags.
+    # The cask workflow's newest-stable-tag gate now covers that: an -rc tag is
+    # never the newest *stable* tag, so it cannot move what `brew install`
+    # resolves to. Deleting that gate would silently undo this.
+    #
+    # Flipping this back to "auto" or "false" does not restore the old
+    # behaviour: repository.token is gone, so goreleaser would fall back to the
+    # built-in GITHUB_TOKEN and 403 against the tap. Loud, but the reason
+    # belongs on the line someone would edit.
+    skip_upload: "true"
+    # Still load-bearing with nothing being pushed: the cask pipe skips
+    # generation entirely when repository.name is unset, and there would be no
+    # file to hand to the cask workflow.
+    #
+    # No token here. This run cannot reach the tap, so the release job does not
+    # hold a tap credential at all — HOMEBREW_TAP_TOKEN belongs to the one
+    # workflow that writes to homebrew-tap. That token is a fine-grained PAT
+    # scoped to the tap alone; the built-in GITHUB_TOKEN cannot write there at
+    # any permission level, since its scope ends at this repository and being
+    # the same owner does not help.
     repository:
       owner: abigotado
       name: homebrew-tap
-      # Not the workflow's built-in GITHUB_TOKEN: its permissions stop at the
-      # repository containing the workflow, so a cross-repo push returns 403.
-      # Being the same owner does not help. The fine-grained token this reads is
-      # scoped to homebrew-tap alone, so a credential sitting in CI for a year
-      # cannot reach this repository's source.
-      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
     hooks:
       post:
         # Not optional. Homebrew quarantines everything a cask stages, and
@@ -113,11 +135,20 @@ release:
   # Draft while the pipeline is young: the artifact list gets inspected before
   # it is public. Flip to false once it has proven itself.
   #
-  # This now couples to Homebrew. The cask is pushed to the tap during the same
-  # run, pointing at release download URLs that stay 404 until the draft is
-  # published — so `brew install` is broken for the window between the tag and
-  # that click. Publish promptly, or set draft: false and accept that the
-  # artifact list goes public unreviewed.
+  # Homebrew no longer rides on that decision. The cask this run generates is
+  # attached to the release as trello-cli.rb and pushed to the tap by
+  # .github/workflows/cask.yaml, which waits for `release: published`. So
+  # publishing the draft is the act that ships the cask, and until then the tap
+  # keeps pointing at the previous version — one release behind, but installable.
+  #
+  # What that replaces: the cask used to be pushed during this run, pointing at
+  # download URLs that stay 404 for as long as the release is a draft. On v0.2.0
+  # the tap advertised a version nobody could install for 54 minutes (created
+  # 11:51Z, published 12:45Z). "Publish promptly" was the only thing standing
+  # between that and a user hitting it.
+  #
+  # Setting draft: false stays safe: the release job dispatches the cask
+  # workflow itself when the release is already public.
   draft: true
   prerelease: auto
   # A tag is immutable, so a job that dies mid-upload must be re-runnable.

@@ -62,6 +62,33 @@ jobs:
           go install github.com/goreleaser/goreleaser/v2@v2.17.1
           goreleaser check
 
+      # Everything above this line checks Go. The release path is mostly shell
+      # living in workflow files — release.yaml decides whether the cask may
+      # move, cask.yaml verifies and pushes it — and nothing was checking any of
+      # it. actionlint validates the workflow expressions and hands every `run:`
+      # block to shellcheck, which is what catches an unquoted expansion, a
+      # pipeline whose failure is swallowed, or a context that does not exist in
+      # a step `if:`. Those are the mistakes that only show up during a release,
+      # against a tag that is already public and immutable.
+      #
+      # Pinned rather than @latest: a lint gate that changes what it rejects on
+      # its own schedule turns an unrelated pull request red. No GOTOOLCHAIN
+      # here, unlike goreleaser above — actionlint declares go 1.18, so the
+      # go.mod toolchain builds it.
+      - name: actionlint
+        run: |
+          set -euo pipefail
+          # actionlint falls back to workflow-syntax-only when shellcheck is
+          # missing, and reports success having checked no shell at all.
+          # ubuntu-latest ships it; assert that rather than assume it, because
+          # the failure mode is silent loss of coverage.
+          if ! command -v shellcheck >/dev/null; then
+            echo "::error::shellcheck is not installed; actionlint would skip every run: block"
+            exit 1
+          fi
+          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+          actionlint
+
       # The generated contract is what agents read. If regenerating changes it,
       # the committed copy no longer matches internal/errx.
       - name: Generated contract is current
