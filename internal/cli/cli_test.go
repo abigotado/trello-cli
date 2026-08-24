@@ -78,6 +78,26 @@ func (m *memStore) Delete(_ context.Context, account string) error {
 	return nil
 }
 
+type loginCapabilityStore struct {
+	*memStore
+	saveCalls         int
+	saveForLoginCalls int
+}
+
+func newLoginCapabilityStore() *loginCapabilityStore {
+	return &loginCapabilityStore{memStore: newMemStore()}
+}
+
+func (s *loginCapabilityStore) Save(ctx context.Context, account string, creds auth.Credentials) error {
+	s.saveCalls++
+	return s.memStore.Save(ctx, account, creds)
+}
+
+func (s *loginCapabilityStore) SaveForLogin(ctx context.Context, account string, creds auth.Credentials) error {
+	s.saveForLoginCalls++
+	return s.memStore.Save(ctx, account, creds)
+}
+
 func newHarness(t *testing.T, envs map[string]string, store auth.Store) *harness {
 	t.Helper()
 	dir := t.TempDir()
@@ -395,6 +415,32 @@ func TestAuthLoginStoresTheGivenCredentials(t *testing.T) {
 	// The success envelope must not contain the token it just stored.
 	if strings.Contains(h.out()+h.err(), "tok-1") {
 		t.Error("login echoed the stored token")
+	}
+}
+
+func TestAuthLoginUsesLoginCapabilityAndRenameUsesOrdinarySave(t *testing.T) {
+	const tokenSentinel = "login-capability-token-sentinel"
+	store := newLoginCapabilityStore()
+	h := newHarness(t, nil, store)
+
+	if got := h.run("--account", "old", "auth", "login", "--api-key", "login-key", "--token", tokenSentinel); got != errx.CodeOK {
+		t.Fatalf("login exit code = %d, want 0", got)
+	}
+	if store.saveForLoginCalls != 1 || store.saveCalls != 0 {
+		t.Errorf("login calls: SaveForLogin = %d, Save = %d; want 1/0", store.saveForLoginCalls, store.saveCalls)
+	}
+	if strings.Contains(h.out()+h.err(), tokenSentinel) {
+		t.Error("login output disclosed the token sentinel")
+	}
+
+	if got := h.run("auth", "rename", "old", "new"); got != errx.CodeOK {
+		t.Fatalf("rename exit code = %d, want 0", got)
+	}
+	if store.saveForLoginCalls != 1 || store.saveCalls != 1 {
+		t.Errorf("after rename calls: SaveForLogin = %d, Save = %d; want 1/1", store.saveForLoginCalls, store.saveCalls)
+	}
+	if strings.Contains(h.out()+h.err(), tokenSentinel) {
+		t.Error("rename output disclosed the token sentinel")
 	}
 }
 
@@ -1730,9 +1776,9 @@ func TestAuthListEnumeratesAccountsAndMarksTheDefault(t *testing.T) {
 	}
 }
 
-// Listing accounts must not touch the keychain. On macOS an unsigned binary
-// raises a modal prompt per account, and an agent calling this to discover
-// accounts would hang on the first invisible dialog.
+// Listing accounts must not touch the keychain. It is a metadata query; making
+// one protected store call per account would add failure modes without making
+// the list of names more accurate.
 func TestAuthListDoesNotReadTheKeychainByDefault(t *testing.T) {
 	store := &fakeStore{creds: auth.Credentials{APIKey: "abcd1234", Token: "tok"}}
 	h := newHarness(t, nil, store)

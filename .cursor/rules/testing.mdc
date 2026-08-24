@@ -28,15 +28,26 @@ Test at boundaries, not internals.
 
 - **HTTP**: `net/http/httptest`. Never call the real Trello API from a test.
   Point the client's base URL at the test server via `internal/config`.
-- **Keychain**: `keyring.MockInit()`. Never touch the real OS keychain — on a
-  Linux CI runner `go-keyring` needs D-Bus and will fail or hang, and on macOS
-  it raises a modal prompt.
+- **Keychain**: inject a fake `auth.Store` (or the narrow credential-store
+  interface owned by the caller). Ordinary tests never touch the real OS
+  keychain. Darwin unit tests exercise pure wire-format, status, size, and
+  upsert helpers; native CI compile/link checks cover the C bridge and type
+  guard without reading credentials from the developer's keychain.
 - **Filesystem**: `t.TempDir()`. Never write to the developer's real cache
   directory.
 - **Environment**: `t.Setenv()`. Never mutate `os.Environ` directly.
 
 A test that depends on the developer's home directory, network, or Trello
 account is not a test.
+
+The sole native Keychain integration exception is a build-tagged cross-binary
+CI check. It creates two fresh disposable `SecKeychainRef` values: Keychain A
+is the explicit `kSecMatchSearchList` target containing the existing item, and
+Keychain B is the explicit `kSecUseKeychain` add target. The second binary
+unlocks both. It uses a synthetic marker, never the default keychain or user
+search list; emits no marker or credential material; and removes every item and
+both temporary Keychains on success, failure, signal, or timeout. No ordinary
+test may widen this exception.
 
 ## What must be covered
 

@@ -6,7 +6,14 @@ Add tests for changed behavior. Read `.agents/rules/testing.md` first.
    the condition and expected result.
 2. Test at boundaries, not internals. Mock the HTTP transport with
    `net/http/httptest`; never reach the real Trello API, and never touch the
-   real OS keychain — use `keyring.MockInit()`.
+   real OS keychain — inject a fake credential store. Darwin unit tests cover
+   pure wire-format, status, size, and upsert helpers; native CI compile/link
+   checks cover the C bridge and type guard.
+   The build-tagged cross-binary integration check may use only two disposable
+   `SecKeychainRef` values: A as the explicit `kSecMatchSearchList` target and B
+   as the explicit `kSecUseKeychain` add target. The second binary unlocks both,
+   never modifies the default/user search list, prints no marker, and cleans up
+   both on every exit path.
 3. Cover the success path, the error path, and the edge cases that actually
    occur: empty results, ambiguous matches, stale cache entries, 429 with and
    without `Retry-After`, and non-JSON error bodies.

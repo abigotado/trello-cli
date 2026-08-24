@@ -2,10 +2,10 @@
 //
 // Two rules shape everything here.
 //
-// Lookup prefers the environment over the OS keychain. On macOS a freshly
-// rebuilt, unsigned binary triggers a modal keychain-access prompt, and an
-// agent shelling out to it would hang on a dialog it cannot see, so the
-// environment path must be reachable without touching the keychain at all.
+// Lookup prefers the environment over the OS keychain. The macOS backend
+// refuses authentication UI and reports a typed failure when Keychain access
+// would require it, so the environment path must remain reachable without
+// touching the keychain at all for headless and CI callers.
 //
 // Account selection is per invocation and never stateful. There is deliberately
 // no "switch accounts" command: an active-account setting is hidden global
@@ -23,7 +23,6 @@ import (
 	"strings"
 
 	"github.com/abigotado/trello-cli/internal/errx"
-	"github.com/zalando/go-keyring"
 )
 
 const (
@@ -103,25 +102,53 @@ type Store interface {
 	Delete(ctx context.Context, account string) error
 }
 
-// KeyringStore is the OS keychain implementation of [Store].
-type KeyringStore struct{}
+// LoginStore extends Store with the explicit capability to migrate an
+// existing credential's access policy during an explicit auth login.
+type LoginStore interface {
+	Store
+	SaveForLogin(ctx context.Context, account string, creds Credentials) error
+}
+
+// KeyringStore is the OS keychain implementation of [Store]. Its zero value
+// selects the backend for the current platform.
+type KeyringStore struct {
+	backend keyringBackend
+}
+
+type keyringBackend interface {
+	get(ctx context.Context, service, account string) (string, error)
+	set(ctx context.Context, service, account, value string) error
+	setForLogin(ctx context.Context, service, primaryAccount, legacyAccount, value string) error
+	delete(ctx context.Context, service, account string) error
+}
+
+var errKeyringNotFound = errors.New("keyring item not found")
+
+func (s KeyringStore) selectedBackend() keyringBackend {
+	if s.backend != nil {
+		return s.backend
+	}
+	return platformKeyringBackend()
+}
 
 func entryName(account string) string { return accountPrefix + account }
 
 // Load reads one account's credentials. A missing entry is not an error: it
 // returns the zero Credentials so the caller can fall through.
-func (KeyringStore) Load(ctx context.Context, account string) (Credentials, error) {
+func (s KeyringStore) Load(ctx context.Context, account string) (Credentials, error) {
 	if err := ctx.Err(); err != nil {
 		return Credentials{}, err
 	}
-	raw, err := keyring.Get(KeyringService, entryName(account))
-	if errors.Is(err, keyring.ErrNotFound) && account == DefaultAccount {
-		// Fall back to the pre-accounts entry, so an existing login keeps
-		// working without the user having to log in again.
-		raw, err = keyring.Get(KeyringService, legacyUser)
+	backend := s.selectedBackend()
+	raw, err := backend.get(ctx, KeyringService, entryName(account))
+	if errors.Is(err, errKeyringNotFound) && account == DefaultAccount {
+		// Fall back to the pre-accounts entry so its service/account schema
+		// remains supported. On macOS, auth login may first need to migrate
+		// that legacy item's creator-scoped access policy.
+		raw, err = backend.get(ctx, KeyringService, legacyUser)
 	}
 	if err != nil {
-		if errors.Is(err, keyring.ErrNotFound) {
+		if errors.Is(err, errKeyringNotFound) {
 			return Credentials{}, nil
 		}
 		return Credentials{}, errx.Auth("KEYRING_UNAVAILABLE", "read keychain: %v", err).Wrap(err)
@@ -134,7 +161,17 @@ func (KeyringStore) Load(ctx context.Context, account string) (Credentials, erro
 }
 
 // Save writes one account's credentials as a single atomic entry.
-func (KeyringStore) Save(ctx context.Context, account string, creds Credentials) error {
+func (s KeyringStore) Save(ctx context.Context, account string, creds Credentials) error {
+	return s.save(ctx, account, creds, false)
+}
+
+// SaveForLogin writes credentials and, on macOS, permits the interactive ACL
+// migration required to keep an existing item stable across binary rebuilds.
+func (s KeyringStore) SaveForLogin(ctx context.Context, account string, creds Credentials) error {
+	return s.save(ctx, account, creds, true)
+}
+
+func (s KeyringStore) save(ctx context.Context, account string, creds Credentials, forLogin bool) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -145,22 +182,36 @@ func (KeyringStore) Save(ctx context.Context, account string, creds Credentials)
 	if err != nil {
 		return errx.Internal("encode credentials: %v", err)
 	}
-	if err := keyring.Set(KeyringService, entryName(account), string(blob)); err != nil {
+	backend := s.selectedBackend()
+	if !forLogin {
+		err = backend.set(ctx, KeyringService, entryName(account), string(blob))
+	} else {
+		legacyAccount := ""
+		if account == DefaultAccount {
+			legacyAccount = legacyUser
+		}
+		err = backend.setForLogin(ctx, KeyringService, entryName(account), legacyAccount, string(blob))
+	}
+	if err != nil {
 		return errx.Auth("KEYRING_UNAVAILABLE", "write keychain: %v", err).Wrap(err)
 	}
 	return nil
 }
 
 // Delete removes one account's entry. Deleting a missing entry succeeds.
-func (KeyringStore) Delete(ctx context.Context, account string) error {
+func (s KeyringStore) Delete(ctx context.Context, account string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	err := keyring.Delete(KeyringService, entryName(account))
-	if errors.Is(err, keyring.ErrNotFound) && account == DefaultAccount {
-		err = keyring.Delete(KeyringService, legacyUser)
+	backend := s.selectedBackend()
+	if account == DefaultAccount {
+		err := backend.delete(ctx, KeyringService, legacyUser)
+		if err != nil && !errors.Is(err, errKeyringNotFound) {
+			return errx.Auth("KEYRING_UNAVAILABLE", "delete from keychain: %v", err).Wrap(err)
+		}
 	}
-	if err != nil && !errors.Is(err, keyring.ErrNotFound) {
+	err := backend.delete(ctx, KeyringService, entryName(account))
+	if err != nil && !errors.Is(err, errKeyringNotFound) {
 		return errx.Auth("KEYRING_UNAVAILABLE", "delete from keychain: %v", err).Wrap(err)
 	}
 	return nil
@@ -171,7 +222,7 @@ type Resolver struct {
 	// Lookup is normally os.LookupEnv. Tests supply their own.
 	Lookup func(string) (string, bool)
 	// Store is consulted only when the environment does not supply both raw
-	// values, so a headless caller never triggers a keychain prompt.
+	// values, so a headless caller can bypass Keychain availability entirely.
 	Store Store
 	// Registry supplies the stored default and the known account names.
 	Registry *Registry

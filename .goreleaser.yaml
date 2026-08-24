@@ -1,7 +1,8 @@
-# Release pipeline. Rehearse with `goreleaser release --skip=publish --clean` on
-# a clean tagged tree: --snapshot skips the changelog pipe entirely, so it does
-# not exercise the notes the real release will carry. release.footer is still
-# rendered only at publish time.
+# Release pipeline. Rehearse on macOS with
+# `goreleaser release --skip=publish --clean` on a clean tagged tree:
+# --snapshot skips the changelog pipe entirely, so it does not exercise the
+# notes the real release will carry. release.footer is still rendered only at
+# publish time.
 #
 # There are deliberately no -X ldflags. Go stamps the version, revision, and
 # commit time into the binary from VCS with no build flags at all, and that
@@ -19,7 +20,27 @@ before:
     - go mod download
 
 builds:
-  - id: trello-cli
+  # Darwin is native rather than portable: cgo links the credential store
+  # directly against Security.framework. The macOS release runner can build
+  # both amd64 and arm64 with Apple's SDK and clang toolchain.
+  - id: trello-cli-darwin
+    main: ./cmd/trello-cli
+    binary: trello-cli
+    env:
+      - CGO_ENABLED=1
+    flags:
+      - -trimpath
+    # Listed explicitly to suppress goreleaser's default -X main.version flags,
+    # which this binary has no variables to receive.
+    ldflags:
+      - -s -w
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    goos: [darwin]
+    goarch: [amd64, arm64]
+
+  # Linux and Windows keep the go-keyring platform backends. They remain
+  # portable cross-builds and do not need a C toolchain on the macOS runner.
+  - id: trello-cli-portable
     main: ./cmd/trello-cli
     binary: trello-cli
     env:
@@ -31,12 +52,12 @@ builds:
     ldflags:
       - -s -w
     mod_timestamp: "{{ .CommitTimestamp }}"
-    goos: [darwin, linux, windows]
+    goos: [linux, windows]
     goarch: [amd64, arm64]
 
 archives:
   - id: trello-cli
-    ids: [trello-cli]
+    ids: [trello-cli-darwin, trello-cli-portable]
     formats: [tar.gz]
     format_overrides:
       - goos: windows

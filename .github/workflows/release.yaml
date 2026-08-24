@@ -51,7 +51,10 @@ env:
 jobs:
   release:
     name: Release
-    runs-on: ubuntu-latest
+    # GoReleaser links the Darwin binaries against Security.framework, so the
+    # release must run where Apple's SDK and cgo toolchain are available. The
+    # same runner cross-builds the CGO-disabled Linux and Windows artifacts.
+    runs-on: macos-15
     permissions:
       contents: write
       # Only the last step uses this, for `gh workflow run` — workflow_dispatch

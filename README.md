@@ -40,6 +40,18 @@ Go 1.24.1 or newer:
 go install github.com/abigotado/trello-cli/cmd/trello-cli@latest
 ```
 
+On macOS, source builds need cgo and the macOS SDK. The native credential
+backend calls Security.framework's `SecItem` APIs directly; it does not invoke
+`/usr/bin/security` or another password-manager subprocess. A Darwin build
+with `CGO_ENABLED=0` is intentionally environment-only: commands can use
+`TRELLO_API_KEY` and `TRELLO_TOKEN`, but stored credentials are unavailable.
+Linux and Windows builds continue to use `go-keyring` with the platform's
+native credential store. Existing macOS entries keep the same service,
+account, and wire schema. An older entry created by `go-keyring` may still have
+a creator-only ACL tied to the binary that wrote it; if the upgraded CLI cannot
+read that entry, run `auth login` once for the affected account. macOS may show
+one authorization prompt per older item during that explicit migration.
+
 Or from a checkout:
 
 ```bash
@@ -81,6 +93,14 @@ account is named.
 Add `--dry-run` to rehearse: it reports the account it would write to and stores
 nothing.
 
+On macOS, `auth login` is the only credential path allowed to request user
+authorization. Newly created or migrated items use a stable
+allow-any-application ACL: another process already running as the same local
+user is outside this tool's threat model. Reads, logout/delete, rename, and
+ordinary stored-credential updates keep authentication UI disabled and fail
+with a typed error instead of prompting. After the one-time migration, normal
+invocations are noninteractive again.
+
 Put the wrong credential under a name? `trello-cli auth rename old new` moves it
 without ever displaying it, and carries the default across if it was the
 default. It refuses to overwrite a name that already exists.
@@ -91,8 +111,11 @@ as long as the process runs it is in the argv that `ps` will print for anything
 running as you.
 
 For CI and headless agents, set `TRELLO_API_KEY` and `TRELLO_TOKEN` instead. The
-environment is read before the keychain is touched at all, so an unattended run
-can never block on a keychain prompt it cannot answer.
+environment is read before the keychain is touched at all. On macOS, stored
+credential queries disable authentication UI with
+`kSecUseAuthenticationUIFail`: outside the explicit `auth login` migration,
+access that would require a prompt returns a typed authentication failure
+instead of hanging an unattended invocation.
 
 Credentials are chosen per invocation, most specific first:
 

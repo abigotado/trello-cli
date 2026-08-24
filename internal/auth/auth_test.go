@@ -9,7 +9,6 @@ import (
 	"testing"
 
 	"github.com/abigotado/trello-cli/internal/errx"
-	"github.com/zalando/go-keyring"
 )
 
 // env builds a lookup over a fixed map, so no test depends on the developer's
@@ -46,21 +45,6 @@ func (f *fakeStore) Save(_ context.Context, account string, c Credentials) error
 func (f *fakeStore) Delete(_ context.Context, account string) error {
 	delete(f.creds, account)
 	return f.err
-}
-
-// mockKeyring swaps in go-keyring's in-memory provider and clears entries
-// afterwards. Without it these tests would hit the real OS keychain: a modal
-// prompt on macOS, and a D-Bus failure or hang on a Linux CI runner. The
-// cleanup matters because MockInit is process-global.
-func mockKeyring(t *testing.T, accounts ...string) {
-	t.Helper()
-	keyring.MockInit()
-	t.Cleanup(func() {
-		_ = keyring.Delete(KeyringService, legacyUser)
-		for _, a := range accounts {
-			_ = keyring.Delete(KeyringService, entryName(a))
-		}
-	})
 }
 
 // isolateConfigDir points os.UserConfigDir at a temp directory so no test
@@ -206,8 +190,8 @@ func TestResolvePrecedence(t *testing.T) {
 	}
 }
 
-// The environment path must be reachable without touching the keychain, or an
-// agent on macOS hangs on a modal prompt it cannot see.
+// The environment path is the headless/CI contract and must remain available
+// without depending on any OS credential-store state or permissions.
 func TestRawEnvCredentialsNeverTouchTheKeychain(t *testing.T) {
 	isolateConfigDir(t)
 	store := newFakeStore(map[string]Credentials{"work": {APIKey: "k", Token: "t"}})
@@ -226,69 +210,6 @@ func TestRawEnvCredentialsNeverTouchTheKeychain(t *testing.T) {
 	}
 	if len(store.read) != 0 {
 		t.Errorf("the keychain was read for accounts %v", store.read)
-	}
-}
-
-// An existing pre-accounts login must keep working rather than silently
-// becoming "not authenticated" after an upgrade.
-func TestLegacyEntryIsReadAsTheDefaultAccount(t *testing.T) {
-	mockKeyring(t, DefaultAccount)
-	if err := keyring.Set(KeyringService, legacyUser, `{"api_key":"old-key","token":"old-token"}`); err != nil {
-		t.Fatalf("seed legacy entry: %v", err)
-	}
-
-	got, err := KeyringStore{}.Load(context.Background(), DefaultAccount)
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-	if got.APIKey != "old-key" {
-		t.Errorf("APIKey = %q, want the legacy entry", got.APIKey)
-	}
-
-	// Only the default account inherits it; a named account must not.
-	other, err := KeyringStore{}.Load(context.Background(), "work")
-	if err != nil {
-		t.Fatalf("Load(work) error = %v", err)
-	}
-	if other.Valid() {
-		t.Errorf("a named account read the legacy entry: %+v", other)
-	}
-}
-
-func TestKeyringStoreIsolatesAccounts(t *testing.T) {
-	mockKeyring(t, "work", "personal")
-	ctx := context.Background()
-	store := KeyringStore{}
-
-	work := Credentials{APIKey: "wk", Token: "wt"}
-	personal := Credentials{APIKey: "pk", Token: "pt"}
-	if err := store.Save(ctx, "work", work); err != nil {
-		t.Fatalf("Save(work): %v", err)
-	}
-	if err := store.Save(ctx, "personal", personal); err != nil {
-		t.Fatalf("Save(personal): %v", err)
-	}
-
-	if got, _ := store.Load(ctx, "work"); got != work {
-		t.Errorf("work = %+v, want %+v", got, work)
-	}
-	if got, _ := store.Load(ctx, "personal"); got != personal {
-		t.Errorf("personal = %+v, want %+v", got, personal)
-	}
-
-	// Removing one must not disturb the other.
-	if err := store.Delete(ctx, "work"); err != nil {
-		t.Fatalf("Delete(work): %v", err)
-	}
-	if got, _ := store.Load(ctx, "work"); got.Valid() {
-		t.Error("work survived deletion")
-	}
-	if got, _ := store.Load(ctx, "personal"); got != personal {
-		t.Errorf("deleting work disturbed personal: %+v", got)
-	}
-	// Deleting an absent account succeeds, so logout is idempotent.
-	if err := store.Delete(ctx, "work"); err != nil {
-		t.Errorf("second Delete() error = %v", err)
 	}
 }
 
@@ -455,34 +376,6 @@ func TestCredentialsValid(t *testing.T) {
 				t.Errorf("Valid() = %v, want %v", got, tt.want)
 			}
 		})
-	}
-}
-
-func TestKeyringStoreRejectsPartialCredentials(t *testing.T) {
-	mockKeyring(t, "work")
-	err := KeyringStore{}.Save(context.Background(), "work", Credentials{APIKey: "only-key"})
-	if errx.ExitCode(err) != errx.CodeUsage {
-		t.Errorf("exit code = %d, want %d (usage)", errx.ExitCode(err), errx.CodeUsage)
-	}
-}
-
-func TestKeyringStoreReportsCorruptEntry(t *testing.T) {
-	mockKeyring(t, "work")
-	if err := keyring.Set(KeyringService, entryName("work"), "not json"); err != nil {
-		t.Fatalf("seeding the keychain failed: %v", err)
-	}
-	_, err := KeyringStore{}.Load(context.Background(), "work")
-	if errx.ExitCode(err) != errx.CodeAuth {
-		t.Errorf("exit code = %d, want %d (auth)", errx.ExitCode(err), errx.CodeAuth)
-	}
-}
-
-func TestCancelledContextStopsKeychainAccess(t *testing.T) {
-	mockKeyring(t)
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if _, err := (KeyringStore{}).Load(ctx, DefaultAccount); !errors.Is(err, context.Canceled) {
-		t.Errorf("Load() error = %v, want context.Canceled", err)
 	}
 }
 

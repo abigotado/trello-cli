@@ -54,9 +54,9 @@ const (
 	CredentialNone Credential = "none"
 	// CredentialStored is what the registry alone can tell you: a credential
 	// was saved under this name and not logged out. Reaching this needs no
-	// keychain access, which is why the listing path stops here — on macOS an
-	// unsigned binary raises a modal prompt per account, and an agent would
-	// hang on the first invisible dialog.
+	// keychain access, which is why the listing path stops here: proving more
+	// would add a protected store operation for every account without making
+	// the name list more accurate.
 	CredentialStored Credential = "stored"
 	// CredentialPresent means the keychain was actually read and yielded a
 	// well-formed key and token. It is still not proof Trello will accept
