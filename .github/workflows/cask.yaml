@@ -185,6 +185,19 @@ jobs:
             exit 1
           fi
 
+      # Treat the release cask as untrusted input. In particular, a legacy
+      # release workflow can attach its historical cask, so re-check the exact
+      # file before the tap credential is introduced into the job.
+      - name: Reject a Gatekeeper quarantine bypass
+        if: steps.gate.outputs.move == 'true'
+        run: |
+          set -euo pipefail
+          ruby -c cask/trello-cli.rb
+          if grep -Eiq 'xattr|com\.apple\.quarantine' cask/trello-cli.rb; then
+            echo "::error::refusing to publish a cask that bypasses Gatekeeper quarantine"
+            exit 1
+          fi
+
       # The rail against the defect this workflow exists for. Everything above
       # reasons about *when* the assets should be reachable; this fetches them.
       # The cask reaches the tap only if every URL a Homebrew user will fetch

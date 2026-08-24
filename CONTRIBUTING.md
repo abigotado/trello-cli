@@ -177,11 +177,31 @@ think one has already leaked.
   dependency upgrades do not ride along with a feature — Dependabot owns the
   last two.
 
+## macOS release credentials
+
+Real releases fail closed unless all five Apple credentials are configured as
+GitHub Actions secrets. `MACOS_SIGN_P12` is a base64-encoded Developer ID
+Application `.p12`; `MACOS_SIGN_PASSWORD` is its password;
+`MACOS_NOTARY_ISSUER_ID` and `MACOS_NOTARY_KEY_ID` identify the App Store
+Connect API key; and `MACOS_NOTARY_KEY` is the base64-encoded `.p8` private key.
+Never commit these values or expose them to pull-request workflows.
+
+GoReleaser signs and waits for notarization before it archives or publishes a
+Darwin binary. A local or pull-request packaging rehearsal must use
+`goreleaser release --snapshot --skip=notarize --clean`; its unsigned artifacts
+are validation-only and must be deleted, never published. The generated cask
+must not invoke `xattr` or clear `com.apple.quarantine`.
+
+Manual releases also fail closed for legacy tags: a releasable tag must contain
+the repository's macOS release-policy verifier and a matching GoReleaser
+configuration. The cask workflow independently rejects quarantine-clearing
+code before it receives the tap credential.
+
 ## What CI enforces
 
 | Workflow | Check | Enforces |
 | --- | --- | --- |
-| `go` | Build and test | `gofmt`, `go vet`, `go build`, and `go test -race` on Linux and native macOS; a macOS `CGO_ENABLED=0` suite and isolated cross-binary disposable-keychain check; Ubuntu-only `goreleaser check`, `actionlint` with shellcheck over `.github/workflows`, and verification that `go generate` produces no diff |
+| `go` | Build and test | `gofmt`, `go vet`, `go build`, and `go test -race` on Linux and native macOS; a macOS `CGO_ENABLED=0` suite, isolated cross-binary disposable-keychain check, and unsigned release-packaging rehearsal that rejects a quarantine-bypassing cask; Ubuntu-only `goreleaser check`, `actionlint` with shellcheck over `.github/workflows`, and verification that `go generate` produces no diff |
 | `agent harness` | Harness consistency | `.claude/`/`.codex/` stay untracked, Cursor mirrors are in sync, harness unit tests pass |
 
 Both are required to merge into `main`. If you contribute from a fork, the

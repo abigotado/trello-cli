@@ -45,6 +45,17 @@ reads, deletes, ordinary saves, and rename—disables authentication UI and
 fails closed. A
 CGO-disabled Darwin build is environment-only.
 
+## macOS release integrity
+
+Prebuilt Darwin binaries are Developer ID signed with hardened runtime and a
+secure timestamp, then submitted to Apple's notary service. The release fails
+before archiving or publishing unless Apple returns `Accepted`. The Homebrew
+cask never clears `com.apple.quarantine`; Gatekeeper remains an enforced trust
+boundary. Pull-request snapshots skip notarization because untrusted builds do
+not receive release credentials, and those artifacts are deleted rather than
+published. Manual release dispatches reject legacy tags that predate this
+policy, and the tap workflow separately rejects a quarantine-bypassing cask.
+
 ## In scope
 
 - Any path that writes a key or token to disk, a log, stdout, or an error
@@ -63,6 +74,8 @@ CGO-disabled Darwin build is environment-only.
   typed failure to an unattended caller. The sole exception is an explicit
   `auth login`, which may request authorization to replace affected older
   creator-only item ACLs.
+- A release or installer path that removes Gatekeeper quarantine instead of
+  distributing a Developer ID signed, Apple-notarized macOS binary.
 
 ## Out of scope
 

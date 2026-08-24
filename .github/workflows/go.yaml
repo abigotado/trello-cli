@@ -221,6 +221,32 @@ jobs:
             exit 1
           fi
 
+      # Pull requests do not receive Apple signing credentials. Rehearse the
+      # rest of the release graph explicitly without notarization, then inspect
+      # the generated cask so a quarantine bypass cannot return unnoticed.
+      # These snapshot artifacts are deleted and must never be published.
+      - name: Rehearse release packaging
+        if: runner.os == 'macOS'
+        env:
+          GOTOOLCHAIN: auto
+        run: |
+          set -euo pipefail
+          ruby .github/scripts/verify-macos-release-policy_test.rb
+          ruby .github/scripts/verify-macos-release-policy.rb .goreleaser.yaml
+          go install github.com/goreleaser/goreleaser/v2@v2.17.1
+          goreleaser release --snapshot --skip=notarize --clean
+          cask=dist/homebrew/Casks/trello-cli.rb
+          if [ ! -f "${cask}" ]; then
+            echo "::error::snapshot did not generate the Homebrew cask"
+            exit 1
+          fi
+          ruby -c "${cask}"
+          if grep -Eiq 'xattr|com\.apple\.quarantine' "${cask}"; then
+            echo "::error::generated cask bypasses Gatekeeper quarantine"
+            exit 1
+          fi
+          find dist -depth -delete
+
   # Branch protection consumes this stable check name. Keep the OS-specific
   # matrix names for diagnosis, then collapse their aggregate result here so a
   # failed, cancelled, or skipped matrix cannot leave a required check green.

@@ -99,6 +99,14 @@ jobs:
           fi
           echo "releasing ${RELEASE_TAG}"
 
+      # A manual dispatch deliberately checks out the requested tag, including
+      # an old one. Never let that replace release assets with a historical
+      # unsigned build: legacy tags do not carry this verifier, and current
+      # tags must prove that their GoReleaser config still signs, waits for
+      # notarization, and leaves Gatekeeper quarantine intact.
+      - name: Assert the tag carries the signed macOS release policy
+        run: ruby .github/scripts/verify-macos-release-policy.rb .goreleaser.yaml
+
       - name: Set up Go
         uses: actions/setup-go@v7
         with:
@@ -197,6 +205,18 @@ jobs:
       # tap.
       - name: goreleaser release
         run: |
+          set -euo pipefail
+          missing=0
+          for variable in MACOS_SIGN_P12 MACOS_SIGN_PASSWORD MACOS_NOTARY_ISSUER_ID MACOS_NOTARY_KEY_ID MACOS_NOTARY_KEY; do
+            if [ -z "${!variable:-}" ]; then
+              echo "::error::required Apple release secret ${variable} is not configured"
+              missing=1
+            fi
+          done
+          if [ "${missing}" -ne 0 ]; then
+            exit 1
+          fi
+
           # Unquoted on purpose: CASK_SKIP is either a flag or nothing, and
           # quoting it would pass goreleaser an empty argument it rejects. The
           # suppression lives here rather than in a lint config so the reason
@@ -205,6 +225,14 @@ jobs:
           goreleaser release --clean ${CASK_SKIP}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Scope Apple credentials to the one step that signs and notarizes.
+          # The P12 and .p8 values are base64; no step writes them to disk or
+          # imports them into the runner's login keychain.
+          MACOS_SIGN_P12: ${{ secrets.MACOS_SIGN_P12 }}
+          MACOS_SIGN_PASSWORD: ${{ secrets.MACOS_SIGN_PASSWORD }}
+          MACOS_NOTARY_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ISSUER_ID }}
+          MACOS_NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
+          MACOS_NOTARY_KEY: ${{ secrets.MACOS_NOTARY_KEY }}
 
       # The cask that reaches the tap is this file, byte for byte, and it cannot
       # be regenerated later. Verified by rebuilding v0.2.0 and diffing against

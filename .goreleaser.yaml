@@ -1,8 +1,11 @@
 # Release pipeline. Rehearse on macOS with
-# `goreleaser release --skip=publish --clean` on a clean tagged tree:
+# `goreleaser release --skip=publish --clean` on a clean tagged tree with the
+# Apple release credentials present. For an untrusted local/PR packaging check,
+# use `goreleaser release --snapshot --skip=notarize --clean` instead:
 # --snapshot skips the changelog pipe entirely, so it does not exercise the
-# notes the real release will carry. release.footer is still rendered only at
-# publish time.
+# notes the real release will carry, and --skip=notarize deliberately produces
+# unsigned artifacts that must never be published. release.footer is still
+# rendered only at publish time.
 #
 # There are deliberately no -X ldflags. Go stamps the version, revision, and
 # commit time into the binary from VCS with no build flags at all, and that
@@ -54,6 +57,26 @@ builds:
     mod_timestamp: "{{ .CommitTimestamp }}"
     goos: [linux, windows]
     goarch: [amd64, arm64]
+
+# GoReleaser runs this after building and before archiving or publishing. Quill
+# signs the exact Darwin Mach-O with hardened runtime and a secure timestamp,
+# submits those bytes to Apple's notary service, and fails the release unless
+# Apple returns Accepted before the timeout. The P12 certificate and App Store
+# Connect private key are base64-encoded GitHub secrets; env: keeps their
+# contents out of the rendered configuration.
+notarize:
+  macos:
+    - ids: [trello-cli-darwin]
+      enabled: true
+      sign:
+        certificate: "env:MACOS_SIGN_P12"
+        password: "{{ .Env.MACOS_SIGN_PASSWORD }}"
+      notarize:
+        issuer_id: "{{ .Env.MACOS_NOTARY_ISSUER_ID }}"
+        key_id: "{{ .Env.MACOS_NOTARY_KEY_ID }}"
+        key: "env:MACOS_NOTARY_KEY"
+        wait: true
+        timeout: 20m
 
 archives:
   - id: trello-cli
@@ -126,19 +149,10 @@ homebrew_casks:
     repository:
       owner: abigotado
       name: homebrew-tap
-    hooks:
-      post:
-        # Not optional. Homebrew quarantines everything a cask stages, and
-        # --no-quarantine was removed in brew 6.0.14. A quarantined,
-        # un-notarized binary is killed by the kernel on exec: verified against
-        # the v0.1.0 darwin/arm64 artifact, which exits 137 with zero bytes on
-        # both stdout and stderr. For a tool whose contract is "parse stdout,
-        # branch on the exit code", that is the worst possible failure, so a
-        # cask without this hook would be worse than shipping no cask at all.
-        install: |
-          if OS.mac?
-            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/trello-cli"]
-          end
+    # Do not add an install hook that clears com.apple.quarantine. Darwin
+    # artifacts are Developer ID signed and accepted by Apple's notary service
+    # before this cask is generated, so Gatekeeper remains part of the install
+    # boundary instead of being bypassed.
 
 snapshot:
   version_template: "{{ incpatch .Version }}-next"

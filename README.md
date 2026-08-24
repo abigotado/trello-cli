@@ -33,6 +33,10 @@ brew install --cask abigotado/tap/trello-cli
 It is a cask rather than a formula because the release ships prebuilt binaries.
 Casks are no longer macOS-only — `binary` is a portable artifact — but Linux
 cask support landed in Homebrew 4.6, so `brew update` first if yours is older.
+The release pipeline Developer ID signs each macOS binary and waits for Apple
+notarization before it creates or publishes the archive. The generated cask
+does not clear `com.apple.quarantine`; Gatekeeper validates the downloaded
+binary normally.
 
 Go 1.24.1 or newer:
 
