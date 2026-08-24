@@ -223,6 +223,10 @@ jobs:
           # sits on the line it excuses.
           # shellcheck disable=SC2086
           goreleaser release --clean ${CASK_SKIP}
+          if [ -z "${CASK_SKIP}" ]; then
+            ruby -c dist/homebrew/Casks/trello-cli.rb
+            ruby .github/scripts/verify-homebrew-cask.rb dist/homebrew/Casks/trello-cli.rb
+          fi
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Scope Apple credentials to the one step that signs and notarizes.

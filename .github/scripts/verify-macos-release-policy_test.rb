@@ -62,6 +62,31 @@ class VerifyMacosReleasePolicyTest < Minitest::Test
     assert_includes stderr, "enabled macOS notarization for trello-cli-portable is missing"
   end
 
+  def test_rejects_the_named_build_moving_off_darwin
+    config = mutate do |value|
+      darwin = value["builds"].find { |build| build["id"] == "trello-cli-darwin" }
+      darwin["goos"] = ["linux"]
+    end
+
+    success, stderr = verify(config)
+
+    refute success
+    assert_includes stderr, "build trello-cli-darwin must target only Darwin"
+    assert_includes stderr, "no Darwin build is configured"
+  end
+
+  def test_rejects_a_missing_darwin_architecture
+    config = mutate do |value|
+      darwin = value["builds"].find { |build| build["id"] == "trello-cli-darwin" }
+      darwin["goarch"] = ["arm64"]
+    end
+
+    success, stderr = verify(config)
+
+    refute success
+    assert_includes stderr, "build trello-cli-darwin must target amd64 and arm64"
+  end
+
   def test_rejects_a_darwin_target_that_overrides_goos
     config = mutate do |value|
       value["builds"] << {

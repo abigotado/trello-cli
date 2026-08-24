@@ -233,6 +233,7 @@ jobs:
           set -euo pipefail
           ruby .github/scripts/verify-macos-release-policy_test.rb
           ruby .github/scripts/verify-macos-release-policy.rb .goreleaser.yaml
+          ruby .github/scripts/verify-homebrew-cask_test.rb
           go install github.com/goreleaser/goreleaser/v2@v2.17.1
           goreleaser release --snapshot --skip=notarize --clean
           cask=dist/homebrew/Casks/trello-cli.rb
@@ -241,10 +242,7 @@ jobs:
             exit 1
           fi
           ruby -c "${cask}"
-          if grep -Eiq 'xattr|com\.apple\.quarantine' "${cask}"; then
-            echo "::error::generated cask bypasses Gatekeeper quarantine"
-            exit 1
-          fi
+          ruby .github/scripts/verify-homebrew-cask.rb "${cask}"
           find dist -depth -delete
 
   # Branch protection consumes this stable check name. Keep the OS-specific

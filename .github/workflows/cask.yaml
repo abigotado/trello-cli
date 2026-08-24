@@ -186,17 +186,20 @@ jobs:
           fi
 
       # Treat the release cask as untrusted input. In particular, a legacy
-      # release workflow can attach its historical cask, so re-check the exact
-      # file before the tap credential is introduced into the job.
-      - name: Reject a Gatekeeper quarantine bypass
+      # release workflow can attach its historical cask, so accept only the
+      # exact non-executable GoReleaser structure before the tap credential is
+      # introduced into the job.
+      - name: Enforce the non-executable cask structure
         if: steps.gate.outputs.move == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          policy="${RUNNER_TEMP}/verify-homebrew-cask.rb"
+          gh api --method GET "repos/${GITHUB_REPOSITORY}/contents/.github/scripts/verify-homebrew-cask.rb" \
+            -f ref="${GITHUB_WORKFLOW_SHA}" --jq .content | base64 --decode > "${policy}"
           ruby -c cask/trello-cli.rb
-          if grep -Eiq 'xattr|com\.apple\.quarantine' cask/trello-cli.rb; then
-            echo "::error::refusing to publish a cask that bypasses Gatekeeper quarantine"
-            exit 1
-          fi
+          ruby "${policy}" cask/trello-cli.rb
 
       # The rail against the defect this workflow exists for. Everything above
       # reasons about *when* the assets should be reachable; this fetches them.

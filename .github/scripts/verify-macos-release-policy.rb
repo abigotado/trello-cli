@@ -22,7 +22,16 @@ end
 errors = []
 
 builds = Array(config["builds"])
-errors << "build trello-cli-darwin is missing" unless builds.any? { |build| build["id"] == "trello-cli-darwin" }
+darwin_build = builds.find { |build| build["id"] == "trello-cli-darwin" }
+if darwin_build.nil?
+  errors << "build trello-cli-darwin is missing"
+else
+  errors << "build trello-cli-darwin must target only Darwin" unless Array(darwin_build["goos"]) == ["darwin"]
+  architectures = Array(darwin_build["goarch"])
+  unless architectures.length == 2 && architectures.sort == %w[amd64 arm64]
+    errors << "build trello-cli-darwin must target amd64 and arm64"
+  end
+end
 errors << "universal binaries are not permitted by the macOS release policy" unless Array(config["universal_binaries"]).empty?
 
 builds.each do |build|
@@ -34,6 +43,9 @@ end
 
 darwin_builds = builds.select { |build| Array(build["goos"]).include?("darwin") }
 errors << "no Darwin build is configured" if darwin_builds.empty?
+unless darwin_builds.map { |build| build["id"] } == ["trello-cli-darwin"]
+  errors << "trello-cli-darwin must be the only Darwin build"
+end
 
 expected = {
   ["sign", "certificate"] => "env:MACOS_SIGN_P12",
