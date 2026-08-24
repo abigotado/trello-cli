@@ -220,3 +220,21 @@ jobs:
             git diff
             exit 1
           fi
+
+  # Branch protection consumes this stable check name. Keep the OS-specific
+  # matrix names for diagnosis, then collapse their aggregate result here so a
+  # failed, cancelled, or skipped matrix cannot leave a required check green.
+  required:
+    name: Build and test
+    if: ${{ always() }}
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify build matrix
+        env:
+          MATRIX_RESULT: ${{ needs.test.result }}
+        run: |
+          if [ "${MATRIX_RESULT}" != "success" ]; then
+            echo "::error::build matrix completed with ${MATRIX_RESULT}"
+            exit 1
+          fi
