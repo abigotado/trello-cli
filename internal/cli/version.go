@@ -16,16 +16,20 @@ import (
 // with parentheses in it; the contract reports a plain token instead.
 const devVersion = "devel"
 
+// releaseVersion is a fallback for source distributions whose build metadata
+// cannot carry a module version. Release builds may replace it with -X; a
+// module version embedded by the Go toolchain always takes precedence.
+var releaseVersion = devVersion
+
 func (a *App) newVersionCommand() *cobra.Command {
 	return a.newCommand(
 		&cobra.Command{
 			Use:   "version",
 			Short: "Print the build this binary was produced from",
 			Long: "Print the version, commit, and toolchain of this binary.\n\n" +
-				"Everything here is read from the build information the Go toolchain\n" +
-				"embeds. There are no ldflags: a value injected at link time would\n" +
-				"only ever reach a binary the release pipeline built, never one a\n" +
-				"user installed with 'go install'.\n\n" +
+				"The module version embedded by the Go toolchain is preferred. For a\n" +
+				"source distribution, where that version is unavailable, the release\n" +
+				"pipeline may provide the version at link time.\n\n" +
 				"The version is always reported. Commit and commitTime are empty\n" +
 				"for a 'go install' build, which compiles the module zip the proxy\n" +
 				"serves and so has no VCS history to read; quote the version when\n" +
@@ -38,7 +42,7 @@ func (a *App) newVersionCommand() *cobra.Command {
 			Args: cobra.NoArgs,
 		},
 		func(_ context.Context, _ *cobra.Command, _ []string) error {
-			return a.out.Success(buildVersion(debug.ReadBuildInfo))
+			return a.out.Success(buildVersion(debug.ReadBuildInfo, releaseVersion))
 		},
 	)
 }
@@ -47,9 +51,13 @@ func (a *App) newVersionCommand() *cobra.Command {
 //
 // read is a parameter so a test can supply build information rather than
 // depending on how the test binary itself happened to be built.
-func buildVersion(read func() (*debug.BuildInfo, bool)) versionView {
+func buildVersion(read func() (*debug.BuildInfo, bool), fallback string) versionView {
+	version := fallback
+	if version == "" {
+		version = devVersion
+	}
 	view := versionView{
-		Version: devVersion,
+		Version: version,
 		Go:      runtime.Version(),
 		OS:      runtime.GOOS,
 		Arch:    runtime.GOARCH,

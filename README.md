@@ -24,25 +24,27 @@ parsing loop. `--help` is the one exception: it is prose, for people.
 
 ## Install
 
-Homebrew, on macOS or Linux:
+The old Homebrew cask is being retired because it installed a downloaded,
+unsigned macOS executable and removed its quarantine metadata. Do not reinstall
+it. A source-building macOS Formula will replace it after the next stable tag
+provides an immutable source archive and SHA-256. Until then, build the merged
+`main` branch locally to use the native Keychain backend:
 
 ```bash
-brew install --cask abigotado/tap/trello-cli
+git clone https://github.com/abigotado/trello-cli.git
+cd trello-cli
+CGO_ENABLED=1 go build -o trello-cli ./cmd/trello-cli
 ```
-
-It is a cask rather than a formula because the release ships prebuilt binaries.
-Casks are no longer macOS-only — `binary` is a portable artifact — but Linux
-cask support landed in Homebrew 4.6, so `brew update` first if yours is older.
-The release pipeline Developer ID signs each macOS binary and waits for Apple
-notarization before it creates or publishes the archive. The generated cask
-does not clear `com.apple.quarantine`; Gatekeeper validates the downloaded
-binary normally.
 
 Go 1.24.1 or newer:
 
 ```bash
 go install github.com/abigotado/trello-cli/cmd/trello-cli@latest
 ```
+
+Until the next stable tag, `@latest` still resolves to the previous release;
+use the checkout build above when you specifically need the new native macOS
+credential backend.
 
 On macOS, source builds need cgo and the macOS SDK. The native credential
 backend calls Security.framework's `SecItem` APIs directly; it does not invoke
@@ -63,18 +65,21 @@ go build -o trello-cli ./cmd/trello-cli
 ```
 
 Or download a prebuilt binary from
-[Releases](https://github.com/abigotado/trello-cli/releases) — darwin, linux,
-and windows on amd64 and arm64. Each release carries a checksums file:
+[Releases](https://github.com/abigotado/trello-cli/releases) — Linux and
+Windows on amd64 and arm64. Each release carries a checksums file. Prebuilt
+Darwin binaries are deliberately unavailable until they can be Developer ID
+signed and notarized:
 
 ```bash
 shasum -a 256 -c trello-cli_VERSION_checksums.txt --ignore-missing
 ```
 
 `trello-cli version` reports the build any of these produced, which is the first
-thing to include in a bug report. A download, a Homebrew install, or a local
-checkout also reports the commit it was built from; a `go install`
-build compiles the module zip, which carries no VCS history, so it reports its
-version and leaves `commit` empty.
+thing to include in a bug report. A release download or local checkout also
+reports the commit it was built from; a `go install` build compiles the module
+zip, which carries no VCS history, so it reports its version and leaves
+`commit` empty. Source distributions such as the upcoming Homebrew Formula
+inject their release tag as a fallback without changing the response shape.
 
 ## Authenticate
 

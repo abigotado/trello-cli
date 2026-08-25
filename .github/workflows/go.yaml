@@ -179,14 +179,9 @@ jobs:
           go install github.com/goreleaser/goreleaser/v2@v2.17.1
           goreleaser check
 
-      # Everything above this line checks Go. The release path is mostly shell
-      # living in workflow files — release.yaml decides whether the cask may
-      # move, cask.yaml verifies and pushes it — and nothing was checking any of
-      # it. actionlint validates the workflow expressions and hands every `run:`
-      # block to shellcheck, which is what catches an unquoted expansion, a
-      # pipeline whose failure is swallowed, or a context that does not exist in
-      # a step `if:`. Those are the mistakes that only show up during a release,
-      # against a tag that is already public and immutable.
+      # Everything above this line checks Go. actionlint validates workflow
+      # expressions and hands every `run:` block to shellcheck, which catches
+      # release-script defects before they reach an immutable tag.
       #
       # Pinned rather than @latest: a lint gate that changes what it rejects on
       # its own schedule turns an unrelated pull request red. No GOTOOLCHAIN
@@ -221,28 +216,50 @@ jobs:
             exit 1
           fi
 
-      # Pull requests do not receive Apple signing credentials. Rehearse the
-      # rest of the release graph explicitly without notarization, then inspect
-      # the generated cask so a quarantine bypass cannot return unnoticed.
-      # These snapshot artifacts are deleted and must never be published.
+      # Rehearse the portable release graph and prove it cannot grow a Darwin or
+      # Homebrew artifact accidentally. macOS is built locally from source so a
+      # downloaded unsigned executable never enters the supported install path.
       - name: Rehearse release packaging
-        if: runner.os == 'macOS'
+        if: runner.os == 'Linux'
         env:
           GOTOOLCHAIN: auto
         run: |
           set -euo pipefail
-          ruby .github/scripts/verify-macos-release-policy_test.rb
-          ruby .github/scripts/verify-macos-release-policy.rb .goreleaser.yaml
-          ruby .github/scripts/verify-homebrew-cask_test.rb
-          go install github.com/goreleaser/goreleaser/v2@v2.17.1
-          goreleaser release --snapshot --skip=notarize --clean
-          cask=dist/homebrew/Casks/trello-cli.rb
-          if [ ! -f "${cask}" ]; then
-            echo "::error::snapshot did not generate the Homebrew cask"
+          ruby .github/scripts/verify-portable-release-policy_test.rb
+          ruby .github/scripts/verify-portable-release-policy.rb .goreleaser.yaml
+          goreleaser release --snapshot --clean
+          version=$(jq -r '.version' dist/metadata.json)
+          if [ -z "${version}" ] || [ "${version}" = "null" ]; then
+            echo "::error::snapshot metadata carries no version"
             exit 1
           fi
-          ruby -c "${cask}"
-          ruby .github/scripts/verify-homebrew-cask.rb "${cask}"
+
+          for artifact in \
+            "dist/trello-cli_${version}_linux_amd64.tar.gz" \
+            "dist/trello-cli_${version}_linux_arm64.tar.gz" \
+            "dist/trello-cli_${version}_windows_amd64.zip" \
+            "dist/trello-cli_${version}_windows_arm64.zip" \
+            "dist/trello-cli_${version}_checksums.txt"; do
+            if [ ! -f "${artifact}" ]; then
+              echo "::error::snapshot is missing ${artifact}"
+              exit 1
+            fi
+          done
+
+          if find dist -type f \( -iname '*darwin*' -o -name '*.rb' \) -print -quit | grep -q .; then
+            echo "::error::snapshot generated a forbidden Darwin or Homebrew artifact"
+            exit 1
+          fi
+
+          smoke_dir="${RUNNER_TEMP}/trello-cli-release-smoke"
+          mkdir -p "${smoke_dir}"
+          tar -xzf "dist/trello-cli_${version}_linux_amd64.tar.gz" -C "${smoke_dir}"
+          got=$("${smoke_dir}/trello-cli" version -o json | jq -r '.data.version')
+          if [ "${got}" != "v${version}" ]; then
+            echo "::error::snapshot binary reports '${got}', expected 'v${version}'"
+            exit 1
+          fi
+
           find dist -depth -delete
 
   # Branch protection consumes this stable check name. Keep the OS-specific

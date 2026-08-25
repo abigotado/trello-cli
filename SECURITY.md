@@ -45,16 +45,18 @@ reads, deletes, ordinary saves, and rename—disables authentication UI and
 fails closed. A
 CGO-disabled Darwin build is environment-only.
 
-## macOS release integrity
+## macOS distribution integrity
 
-Prebuilt Darwin binaries are Developer ID signed with hardened runtime and a
-secure timestamp, then submitted to Apple's notary service. The release fails
-before archiving or publishing unless Apple returns `Accepted`. The Homebrew
-cask never clears `com.apple.quarantine`; Gatekeeper remains an enforced trust
-boundary. Pull-request snapshots skip notarization because untrusted builds do
-not receive release credentials, and those artifacts are deleted rather than
-published. Manual release dispatches reject legacy tags that predate this
-policy, and the tap workflow separately rejects a quarantine-bypassing cask.
+macOS is distributed from source rather than as a downloaded executable. The
+planned Homebrew package will be a Formula that pins an immutable tag archive
+by SHA-256 and builds locally with cgo, selecting the Security.framework
+backend. Until that Formula lands, install from a source checkout. The release
+pipeline publishes prebuilt archives only for Linux and Windows.
+
+Until Developer ID signing and Apple notarization are available, adding a
+prebuilt Darwin archive or cask is a policy violation. Removing
+`com.apple.quarantine` is not a substitute for establishing artifact identity;
+no supported installer runs `xattr` or otherwise bypasses Gatekeeper.
 
 ## In scope
 
@@ -74,8 +76,8 @@ policy, and the tap workflow separately rejects a quarantine-bypassing cask.
   typed failure to an unattended caller. The sole exception is an explicit
   `auth login`, which may request authorization to replace affected older
   creator-only item ACLs.
-- A release or installer path that removes Gatekeeper quarantine instead of
-  distributing a Developer ID signed, Apple-notarized macOS binary.
+- A release or installer path that distributes an unsigned prebuilt Darwin
+  executable or removes Gatekeeper quarantine instead of building from source.
 
 ## Out of scope
 

@@ -2086,7 +2086,7 @@ func TestBuildVersionReadsTheStamp(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := buildVersion(func() (*debug.BuildInfo, bool) { return tt.info, tt.ok })
+			got := buildVersion(func() (*debug.BuildInfo, bool) { return tt.info, tt.ok }, devVersion)
 			if got.Version != tt.wantVer {
 				t.Errorf("version = %q, want %q", got.Version, tt.wantVer)
 			}
