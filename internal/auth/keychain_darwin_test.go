@@ -680,6 +680,159 @@ func TestDeleteResolvedKeychainItemPreservesStatusWithoutSecrets(t *testing.T) {
 	}
 }
 
+func TestMigrateKeychainItemsUsesPrimaryThenLegacyPresencePolicy(t *testing.T) {
+	tests := []struct {
+		name          string
+		primaryExists bool
+		legacyExists  bool
+		includeLegacy bool
+		wantCalls     []string
+		wantNotFound  bool
+	}{
+		{
+			name:          "default with both entries migrates primary then legacy",
+			primaryExists: true,
+			legacyExists:  true,
+			includeLegacy: true,
+			wantCalls:     []string{"primary", "legacy"},
+		},
+		{
+			name:          "default with primary only still checks legacy",
+			primaryExists: true,
+			includeLegacy: true,
+			wantCalls:     []string{"primary", "legacy"},
+		},
+		{
+			name:          "default with legacy only migrates the fallback",
+			legacyExists:  true,
+			includeLegacy: true,
+			wantCalls:     []string{"primary", "legacy"},
+		},
+		{
+			name:          "default with neither entry reports missing",
+			includeLegacy: true,
+			wantCalls:     []string{"primary", "legacy"},
+			wantNotFound:  true,
+		},
+		{
+			name:          "named account never checks the legacy entry",
+			primaryExists: true,
+			wantCalls:     []string{"primary"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var calls []string
+			primary := func() (bool, error) {
+				calls = append(calls, "primary")
+				return tt.primaryExists, nil
+			}
+			var legacy migrateKeychainItem
+			if tt.includeLegacy {
+				legacy = func() (bool, error) {
+					calls = append(calls, "legacy")
+					return tt.legacyExists, nil
+				}
+			}
+
+			err := migrateKeychainItems(primary, legacy)
+			if tt.wantNotFound {
+				if !errors.Is(err, errKeyringNotFound) {
+					t.Errorf("error = %v, want errKeyringNotFound", err)
+				}
+			} else if err != nil {
+				t.Errorf("migrateKeychainItems() error = %v", err)
+			}
+			if strings.Join(calls, ",") != strings.Join(tt.wantCalls, ",") {
+				t.Errorf("calls = %v, want %v", calls, tt.wantCalls)
+			}
+		})
+	}
+}
+
+func TestMigrateKeychainItemsStopsAtTheFailureBoundary(t *testing.T) {
+	primaryFailure := errors.New("primary migration failed")
+	legacyFailure := errors.New("legacy migration failed")
+	tests := []struct {
+		name      string
+		primary   migrateKeychainItem
+		legacy    migrateKeychainItem
+		wantCalls []string
+		wantError error
+	}{
+		{
+			name: "primary failure stops before legacy",
+			primary: func() (bool, error) {
+				return false, primaryFailure
+			},
+			legacy: func() (bool, error) {
+				return true, nil
+			},
+			wantCalls: []string{"primary"},
+			wantError: primaryFailure,
+		},
+		{
+			name: "legacy failure is returned after primary migrated",
+			primary: func() (bool, error) {
+				return true, nil
+			},
+			legacy: func() (bool, error) {
+				return true, legacyFailure
+			},
+			wantCalls: []string{"primary", "legacy"},
+			wantError: legacyFailure,
+		},
+		{
+			name: "cancellation stops before legacy",
+			primary: func() (bool, error) {
+				return false, context.Canceled
+			},
+			legacy: func() (bool, error) {
+				return true, nil
+			},
+			wantCalls: []string{"primary"},
+			wantError: context.Canceled,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var calls []string
+			wrap := func(name string, migrate migrateKeychainItem) migrateKeychainItem {
+				return func() (bool, error) {
+					calls = append(calls, name)
+					return migrate()
+				}
+			}
+			err := migrateKeychainItems(wrap("primary", tt.primary), wrap("legacy", tt.legacy))
+			if !errors.Is(err, tt.wantError) {
+				t.Errorf("error = %v, want %v", err, tt.wantError)
+			}
+			if strings.Join(calls, ",") != strings.Join(tt.wantCalls, ",") {
+				t.Errorf("calls = %v, want %v", calls, tt.wantCalls)
+			}
+		})
+	}
+}
+
+func TestMigrateKeychainItemsCompatibleItemIsIdempotent(t *testing.T) {
+	calls := 0
+	compatible := func() (bool, error) {
+		calls++
+		return true, nil
+	}
+
+	for attempt := 0; attempt < 2; attempt++ {
+		if err := migrateKeychainItems(compatible, nil); err != nil {
+			t.Fatalf("attempt %d error = %v", attempt+1, err)
+		}
+	}
+	if calls != 2 {
+		t.Errorf("compatible migration calls = %d, want 2", calls)
+	}
+}
+
 func recordLoginOperation(calls *[]string, name string, err error) func() error {
 	return func() error {
 		*calls = append(*calls, name)
@@ -688,21 +841,21 @@ func recordLoginOperation(calls *[]string, name string, err error) func() error 
 }
 
 func TestTranslateKeychainStatus(t *testing.T) {
-	const (
-		interactionNotAllowed int64 = -25308
-		genericFailure        int64 = -50
-	)
+	const genericFailure int64 = -50
 	tests := []struct {
-		name          string
-		status        int64
-		wantNotFound  bool
-		wantDuplicate bool
-		wantStatus    int64
+		name             string
+		status           int64
+		wantNotFound     bool
+		wantDuplicate    bool
+		wantInteraction  bool
+		wantUserCanceled bool
+		wantStatus       int64
 	}{
 		{name: "success returns nil", status: keychainStatusSuccess},
 		{name: "duplicate maps to logical race", status: keychainStatusDuplicateItem, wantDuplicate: true},
 		{name: "item not found maps to logical missing", status: keychainStatusItemNotFound, wantNotFound: true},
-		{name: "interaction not allowed remains a typed status error", status: interactionNotAllowed, wantStatus: interactionNotAllowed},
+		{name: "interaction not allowed maps to logical migration requirement", status: keychainStatusNoInteraction, wantInteraction: true},
+		{name: "native user cancellation maps to its distinct logical signal", status: keychainStatusUserCanceled, wantUserCanceled: true},
 		{name: "generic status remains a typed status error", status: genericFailure, wantStatus: genericFailure},
 	}
 
@@ -721,6 +874,17 @@ func TestTranslateKeychainStatus(t *testing.T) {
 			case tt.wantDuplicate:
 				if !errors.Is(err, errKeyringDuplicate) {
 					t.Errorf("error = %v, want errKeyringDuplicate", err)
+				}
+			case tt.wantInteraction:
+				if !errors.Is(err, errKeyringInteractionNotAllowed) {
+					t.Errorf("error = %v, want errKeyringInteractionNotAllowed", err)
+				}
+			case tt.wantUserCanceled:
+				if !errors.Is(err, errKeyringUserCanceled) {
+					t.Errorf("error = %v, want errKeyringUserCanceled", err)
+				}
+				if errors.Is(err, errKeyringInteractionNotAllowed) || errors.Is(err, context.Canceled) {
+					t.Error("native user cancellation was conflated with another cancellation signal")
 				}
 			default:
 				var statusErr *keychainStatusError

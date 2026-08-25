@@ -33,6 +33,13 @@ func (backend unsupportedKeyringBackend) setForLogin(ctx context.Context, servic
 	return backend.set(ctx, service, primaryAccount, value)
 }
 
+func (unsupportedKeyringBackend) migrate(ctx context.Context, _, _, _ string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return errKeyringMigrationUnsupported
+}
+
 func (unsupportedKeyringBackend) delete(ctx context.Context, _, _ string) error {
 	if err := ctx.Err(); err != nil {
 		return err

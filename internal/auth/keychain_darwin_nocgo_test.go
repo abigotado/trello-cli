@@ -65,12 +65,22 @@ func TestNoCGOStoredOperationsReturnTypedUnavailable(t *testing.T) {
 				return store.Delete(context.Background(), "work")
 			},
 		},
+		{
+			name: "migrate",
+			run: func(store KeyringStore) error {
+				return store.MigrateKeychain(context.Background(), "work")
+			},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			err := tt.run(KeyringStore{})
-			assertAuthError(t, err, "KEYRING_UNAVAILABLE")
+			wantReason := "KEYRING_UNAVAILABLE"
+			if tt.name == "migrate" {
+				wantReason = "KEYRING_MIGRATION_UNAVAILABLE"
+			}
+			assertAuthError(t, err, wantReason)
 			for _, forbidden := range []string{apiKeySentinel, tokenSentinel} {
 				if strings.Contains(err.Error(), forbidden) {
 					t.Error("stored-operation error disclosed a credential sentinel")

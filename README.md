@@ -55,8 +55,10 @@ Linux and Windows builds continue to use `go-keyring` with the platform's
 native credential store. Existing macOS entries keep the same service,
 account, and wire schema. An older entry created by `go-keyring` may still have
 a creator-only ACL tied to the binary that wrote it; if the upgraded CLI cannot
-read that entry, run `auth login` once for the affected account. macOS may show
-one authorization prompt per older item during that explicit migration.
+read that entry, run `trello-cli auth migrate-keychain --account NAME`. This
+changes only the access policy and never reads or rewrites the credential value.
+Re-entering the credential with `auth login` remains an alternative. macOS may
+show one authorization prompt per older item during either explicit migration.
 
 Or from a checkout:
 
@@ -102,13 +104,18 @@ account is named.
 Add `--dry-run` to rehearse: it reports the account it would write to and stores
 nothing.
 
-On macOS, `auth login` is the only credential path allowed to request user
-authorization. Newly created or migrated items use a stable
+On macOS, `auth login` and `auth migrate-keychain` are the only credential paths
+allowed to request user authorization. Use `migrate-keychain` when you want to
+keep the existing value untouched; it changes only the ACL of the exact
+`trello-cli` service/account item. Newly created or migrated items use a stable
 allow-any-application ACL: another process already running as the same local
 user is outside this tool's threat model. Reads, logout/delete, rename, and
-ordinary stored-credential updates keep authentication UI disabled and fail
-with a typed error instead of prompting. After the one-time migration, normal
-invocations are noninteractive again.
+ordinary stored-credential updates keep authentication UI disabled and return
+`KEYRING_MIGRATION_REQUIRED` with the account-specific migration command instead
+of prompting. After the one-time migration, normal invocations are
+noninteractive again. Run that command from an interactive macOS session; if
+you cancel the authorization prompt, its error keeps the same account in the
+retry command.
 
 Put the wrong credential under a name? `trello-cli auth rename old new` moves it
 without ever displaying it, and carries the default across if it was the
@@ -122,9 +129,10 @@ running as you.
 For CI and headless agents, set `TRELLO_API_KEY` and `TRELLO_TOKEN` instead. The
 environment is read before the keychain is touched at all. On macOS, stored
 credential queries disable authentication UI with
-`kSecUseAuthenticationUIFail`: outside the explicit `auth login` migration,
-access that would require a prompt returns a typed authentication failure
-instead of hanging an unattended invocation.
+`kSecUseAuthenticationUIFail`: outside the explicit `auth login` migration and
+the ACL-only `auth migrate-keychain` operation, access that would require a
+prompt returns a typed authentication failure instead of hanging an unattended
+invocation.
 
 Credentials are chosen per invocation, most specific first:
 

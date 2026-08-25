@@ -109,6 +109,12 @@ type LoginStore interface {
 	SaveForLogin(ctx context.Context, account string, creds Credentials) error
 }
 
+// MigrationStore is the explicit capability to make an existing macOS
+// Keychain item's access policy stable without reading or rewriting its value.
+type MigrationStore interface {
+	MigrateKeychain(ctx context.Context, account string) error
+}
+
 // KeyringStore is the OS keychain implementation of [Store]. Its zero value
 // selects the backend for the current platform.
 type KeyringStore struct {
@@ -122,7 +128,16 @@ type keyringBackend interface {
 	delete(ctx context.Context, service, account string) error
 }
 
-var errKeyringNotFound = errors.New("keyring item not found")
+type keyringMigrationBackend interface {
+	migrate(ctx context.Context, service, primaryAccount, legacyAccount string) error
+}
+
+var (
+	errKeyringNotFound              = errors.New("keyring item not found")
+	errKeyringInteractionNotAllowed = errors.New("keyring interaction is not allowed")
+	errKeyringUserCanceled          = errors.New("keyring operation was canceled by the user")
+	errKeyringMigrationUnsupported  = errors.New("keyring access migration is unsupported")
+)
 
 func (s KeyringStore) selectedBackend() keyringBackend {
 	if s.backend != nil {
@@ -143,15 +158,15 @@ func (s KeyringStore) Load(ctx context.Context, account string) (Credentials, er
 	raw, err := backend.get(ctx, KeyringService, entryName(account))
 	if errors.Is(err, errKeyringNotFound) && account == DefaultAccount {
 		// Fall back to the pre-accounts entry so its service/account schema
-		// remains supported. On macOS, auth login may first need to migrate
-		// that legacy item's creator-scoped access policy.
+		// remains supported. On macOS, auth login or auth migrate-keychain may
+		// first need to migrate that legacy item's creator-scoped access policy.
 		raw, err = backend.get(ctx, KeyringService, legacyUser)
 	}
 	if err != nil {
 		if errors.Is(err, errKeyringNotFound) {
 			return Credentials{}, nil
 		}
-		return Credentials{}, errx.Auth("KEYRING_UNAVAILABLE", "read keychain: %v", err).Wrap(err)
+		return Credentials{}, keyringOperationError("read", account, err)
 	}
 	var creds Credentials
 	if err := json.Unmarshal([]byte(raw), &creds); err != nil {
@@ -193,9 +208,62 @@ func (s KeyringStore) save(ctx context.Context, account string, creds Credential
 		err = backend.setForLogin(ctx, KeyringService, entryName(account), legacyAccount, string(blob))
 	}
 	if err != nil {
-		return errx.Auth("KEYRING_UNAVAILABLE", "write keychain: %v", err).Wrap(err)
+		if !forLogin {
+			return keyringOperationError("write", account, err)
+		}
+		if errors.Is(err, context.Canceled) {
+			return context.Canceled
+		}
+		return errx.Auth("KEYRING_UNAVAILABLE", "write keychain: %v", err).
+			WithHint("retry 'trello-cli auth login --account %s'", account).
+			Wrap(err)
 	}
 	return nil
+}
+
+// MigrateKeychain changes only the access policy of the exact entries for an
+// account. The default account also includes the compatible legacy entry.
+func (s KeyringStore) MigrateKeychain(ctx context.Context, account string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	legacyAccount := ""
+	if account == DefaultAccount {
+		legacyAccount = legacyUser
+	}
+	backend, ok := s.selectedBackend().(keyringMigrationBackend)
+	if !ok {
+		return keyringMigrationUnavailable(account, errKeyringMigrationUnsupported)
+	}
+	err := backend.migrate(ctx, KeyringService, entryName(account), legacyAccount)
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, context.Canceled):
+		return context.Canceled
+	case errors.Is(err, errKeyringNotFound):
+		return errx.Auth(
+			"KEYRING_ENTRY_NOT_FOUND",
+			"no stored keychain entry exists for account %q",
+			account,
+		).WithHint("run 'trello-cli auth login --account %s'", account).Wrap(err)
+	case errors.Is(err, errKeyringMigrationUnsupported):
+		return keyringMigrationUnavailable(account, err)
+	case errors.Is(err, errKeyringInteractionNotAllowed):
+		return errx.Auth(
+			"KEYRING_MIGRATION_BLOCKED",
+			"keychain access migration for account %q requires an interactive macOS session",
+			account,
+		).WithHint("run from an interactive macOS session: 'trello-cli auth migrate-keychain --account %s'", account).Wrap(err)
+	case errors.Is(err, errKeyringUserCanceled):
+		return errx.Auth(
+			"KEYRING_MIGRATION_CANCELED",
+			"keychain access migration was canceled for account %q",
+			account,
+		).WithHint("retry 'trello-cli auth migrate-keychain --account %s'", account).Wrap(err)
+	default:
+		return keyringMigrationUnavailable(account, err)
+	}
 }
 
 // Delete removes one account's entry. Deleting a missing entry succeeds.
@@ -207,14 +275,33 @@ func (s KeyringStore) Delete(ctx context.Context, account string) error {
 	if account == DefaultAccount {
 		err := backend.delete(ctx, KeyringService, legacyUser)
 		if err != nil && !errors.Is(err, errKeyringNotFound) {
-			return errx.Auth("KEYRING_UNAVAILABLE", "delete from keychain: %v", err).Wrap(err)
+			return keyringOperationError("delete from", account, err)
 		}
 	}
 	err := backend.delete(ctx, KeyringService, entryName(account))
 	if err != nil && !errors.Is(err, errKeyringNotFound) {
-		return errx.Auth("KEYRING_UNAVAILABLE", "delete from keychain: %v", err).Wrap(err)
+		return keyringOperationError("delete from", account, err)
 	}
 	return nil
+}
+
+func keyringOperationError(operation, account string, err error) error {
+	if errors.Is(err, errKeyringInteractionNotAllowed) || errors.Is(err, errKeyringUserCanceled) {
+		return errx.Auth(
+			"KEYRING_MIGRATION_REQUIRED",
+			"stored keychain access for account %q requires migration",
+			account,
+		).WithHint("run 'trello-cli auth migrate-keychain --account %s'", account).Wrap(err)
+	}
+	return errx.Auth("KEYRING_UNAVAILABLE", "%s keychain: %v", operation, err).Wrap(err)
+}
+
+func keyringMigrationUnavailable(account string, err error) error {
+	return errx.Auth(
+		"KEYRING_MIGRATION_UNAVAILABLE",
+		"keychain access migration is unavailable for account %q",
+		account,
+	).WithHint("run 'trello-cli auth login --account %s'", account).Wrap(err)
 }
 
 // Resolver finds the credentials one invocation should use.

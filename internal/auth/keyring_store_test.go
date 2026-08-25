@@ -25,6 +25,7 @@ type fakeKeyringBackend struct {
 	entries      map[backendEntry]string
 	getErrors    map[backendEntry]error
 	setError     error
+	migrateError error
 	deleteErrors map[backendEntry]error
 	calls        []backendCall
 }
@@ -76,6 +77,15 @@ func (f *fakeKeyringBackend) setForLogin(_ context.Context, service, primaryAcco
 	}
 	f.entries[entry] = value
 	return nil
+}
+
+func (f *fakeKeyringBackend) migrate(_ context.Context, service, primaryAccount, legacyAccount string) error {
+	f.calls = append(f.calls, backendCall{
+		operation:     "migrate",
+		entry:         backendEntry{service: service, account: primaryAccount},
+		legacyAccount: legacyAccount,
+	})
+	return f.migrateError
 }
 
 func (f *fakeKeyringBackend) delete(_ context.Context, service, account string) error {
@@ -167,6 +177,154 @@ func TestKeyringStoreSaveForLoginUsesExplicitCapability(t *testing.T) {
 				t.Error("SaveForLogin() changed the logical JSON passed to the platform backend")
 			}
 		})
+	}
+}
+
+func TestKeyringStoreMigrateUsesExactSchemaWithoutCredentialAccess(t *testing.T) {
+	const valueMarker = "stored-value-must-remain-untouched"
+	tests := []struct {
+		name        string
+		account     string
+		wantPrimary string
+		wantLegacy  string
+	}{
+		{
+			name:        "default includes primary then compatible legacy account",
+			account:     DefaultAccount,
+			wantPrimary: entryName(DefaultAccount),
+			wantLegacy:  legacyUser,
+		},
+		{
+			name:        "named account never includes the legacy credentials account",
+			account:     "work",
+			wantPrimary: entryName("work"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			primary := backendEntry{service: KeyringService, account: tt.wantPrimary}
+			entries := map[backendEntry]string{primary: valueMarker}
+			if tt.wantLegacy != "" {
+				entries[backendEntry{service: KeyringService, account: tt.wantLegacy}] = valueMarker
+			}
+			backend := newFakeKeyringBackend(entries)
+
+			if err := (KeyringStore{backend: backend}).MigrateKeychain(context.Background(), tt.account); err != nil {
+				t.Fatalf("MigrateKeychain() error = %v", err)
+			}
+			if len(backend.calls) != 1 {
+				t.Fatalf("backend calls = %d, want exactly one migration call", len(backend.calls))
+			}
+			call := backend.calls[0]
+			if call.operation != "migrate" || call.entry != primary || call.legacyAccount != tt.wantLegacy {
+				t.Errorf(
+					"migration target = %q %q/%q legacy %q, want migrate %q/%q legacy %q",
+					call.operation,
+					call.entry.service,
+					call.entry.account,
+					call.legacyAccount,
+					KeyringService,
+					tt.wantPrimary,
+					tt.wantLegacy,
+				)
+			}
+			if call.value != "" {
+				t.Error("migration passed a credential value to the backend")
+			}
+			for entry, value := range backend.entries {
+				if value != valueMarker {
+					t.Errorf("migration changed stored value for %q/%q", entry.service, entry.account)
+				}
+			}
+		})
+	}
+}
+
+func TestKeyringStoreMigrateErrorsUseExactAuthContractWithoutCredentialValues(t *testing.T) {
+	const valueMarker = "migration-value-must-not-appear"
+	backendFailure := errors.New("migration backend unavailable")
+	tests := []struct {
+		name       string
+		backendErr error
+		wantReason string
+		wantHint   string
+	}{
+		{
+			name:       "missing entry directs the account to login",
+			backendErr: errKeyringNotFound,
+			wantReason: "KEYRING_ENTRY_NOT_FOUND",
+			wantHint:   "run 'trello-cli auth login --account work'",
+		},
+		{
+			name:       "blocked interaction requires an interactive session for the exact account",
+			backendErr: errKeyringInteractionNotAllowed,
+			wantReason: "KEYRING_MIGRATION_BLOCKED",
+			wantHint:   "run from an interactive macOS session: 'trello-cli auth migrate-keychain --account work'",
+		},
+		{
+			name:       "unsupported migration directs the account to login",
+			backendErr: errKeyringMigrationUnsupported,
+			wantReason: "KEYRING_MIGRATION_UNAVAILABLE",
+			wantHint:   "run 'trello-cli auth login --account work'",
+		},
+		{
+			name:       "explicit migration cancellation directs the account to retry migration",
+			backendErr: errKeyringUserCanceled,
+			wantReason: "KEYRING_MIGRATION_CANCELED",
+			wantHint:   "retry 'trello-cli auth migrate-keychain --account work'",
+		},
+		{
+			name:       "other backend errors keep the recovery account specific",
+			backendErr: backendFailure,
+			wantReason: "KEYRING_MIGRATION_UNAVAILABLE",
+			wantHint:   "run 'trello-cli auth login --account work'",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			entry := backendEntry{service: KeyringService, account: entryName("work")}
+			backend := newFakeKeyringBackend(map[backendEntry]string{entry: valueMarker})
+			backend.migrateError = tt.backendErr
+
+			err := (KeyringStore{backend: backend}).MigrateKeychain(context.Background(), "work")
+			assertAuthError(t, err, tt.wantReason)
+			var typed *errx.Error
+			if !errors.As(err, &typed) {
+				t.Fatal("error is not an *errx.Error")
+			}
+			if typed.Hint != tt.wantHint {
+				t.Errorf("hint = %q, want %q", typed.Hint, tt.wantHint)
+			}
+			if strings.Contains(err.Error(), valueMarker) {
+				t.Error("migration error disclosed the stored value marker")
+			}
+			if len(backend.calls) != 1 || backend.calls[0].operation != "migrate" || backend.calls[0].value != "" {
+				t.Errorf("backend calls = %+v, want one value-free migration call", backend.calls)
+			}
+		})
+	}
+}
+
+func TestKeyringStoreMigratePropagatesBackendContextCancellation(t *testing.T) {
+	backend := newFakeKeyringBackend(nil)
+	backend.migrateError = context.Canceled
+
+	err := (KeyringStore{backend: backend}).MigrateKeychain(context.Background(), "work")
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("error = %v, want context.Canceled", err)
+	}
+}
+
+func TestKeyringStoreWithoutMigrationCapabilityReturnsTypedUnavailable(t *testing.T) {
+	backend := newFakeKeyringBackend(nil)
+	store := KeyringStore{backend: struct{ keyringBackend }{keyringBackend: backend}}
+
+	err := store.MigrateKeychain(context.Background(), "work")
+	assertAuthError(t, err, "KEYRING_MIGRATION_UNAVAILABLE")
+	if len(backend.calls) != 0 {
+		t.Errorf("unsupported migration touched the backend: %+v", backend.calls)
 	}
 }
 
@@ -451,6 +609,139 @@ func TestKeyringStoreBackendFailuresUseAuthContractWithoutCredentials(t *testing
 	}
 }
 
+func TestKeyringStoreSaveForLoginFailuresPreserveTheExactAccount(t *testing.T) {
+	for _, backendErr := range []error{
+		errKeyringInteractionNotAllowed,
+		errKeyringUserCanceled,
+		errors.New("login backend unavailable"),
+	} {
+		backend := newFakeKeyringBackend(nil)
+		backend.setError = backendErr
+
+		err := (KeyringStore{backend: backend}).SaveForLogin(
+			context.Background(),
+			"work",
+			Credentials{APIKey: "key", Token: "token"},
+		)
+		assertAuthError(t, err, "KEYRING_UNAVAILABLE")
+		var typed *errx.Error
+		if !errors.As(err, &typed) {
+			t.Fatal("error is not an *errx.Error")
+		}
+		if want := "retry 'trello-cli auth login --account work'"; typed.Hint != want {
+			t.Errorf("hint = %q, want %q", typed.Hint, want)
+		}
+	}
+}
+
+func TestKeyringStoreSaveForLoginPropagatesBackendContextCancellation(t *testing.T) {
+	backend := newFakeKeyringBackend(nil)
+	backend.setError = context.Canceled
+
+	err := (KeyringStore{backend: backend}).SaveForLogin(
+		context.Background(),
+		"work",
+		Credentials{APIKey: "key", Token: "token"},
+	)
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("error = %v, want context.Canceled", err)
+	}
+}
+
+func TestKeyringStoreProtectedOperationSignalsRequireAccountSpecificMigration(t *testing.T) {
+	const (
+		apiKeySentinel = "protected-operation-api-key-must-not-appear"
+		tokenSentinel  = "protected-operation-token-must-not-appear"
+	)
+	entry := backendEntry{service: KeyringService, account: entryName("work")}
+	tests := []struct {
+		name       string
+		backendErr error
+		run        func(*fakeKeyringBackend) error
+	}{
+		{
+			name:       "load interaction not allowed",
+			backendErr: errKeyringInteractionNotAllowed,
+			run: func(backend *fakeKeyringBackend) error {
+				_, err := (KeyringStore{backend: backend}).Load(context.Background(), "work")
+				return err
+			},
+		},
+		{
+			name:       "load user canceled native authorization",
+			backendErr: errKeyringUserCanceled,
+			run: func(backend *fakeKeyringBackend) error {
+				_, err := (KeyringStore{backend: backend}).Load(context.Background(), "work")
+				return err
+			},
+		},
+		{
+			name:       "save interaction not allowed",
+			backendErr: errKeyringInteractionNotAllowed,
+			run: func(backend *fakeKeyringBackend) error {
+				return (KeyringStore{backend: backend}).Save(
+					context.Background(),
+					"work",
+					Credentials{APIKey: apiKeySentinel, Token: tokenSentinel},
+				)
+			},
+		},
+		{
+			name:       "save user canceled native authorization",
+			backendErr: errKeyringUserCanceled,
+			run: func(backend *fakeKeyringBackend) error {
+				return (KeyringStore{backend: backend}).Save(
+					context.Background(),
+					"work",
+					Credentials{APIKey: apiKeySentinel, Token: tokenSentinel},
+				)
+			},
+		},
+		{
+			name:       "delete interaction not allowed",
+			backendErr: errKeyringInteractionNotAllowed,
+			run: func(backend *fakeKeyringBackend) error {
+				return (KeyringStore{backend: backend}).Delete(context.Background(), "work")
+			},
+		},
+		{
+			name:       "delete user canceled native authorization",
+			backendErr: errKeyringUserCanceled,
+			run: func(backend *fakeKeyringBackend) error {
+				return (KeyringStore{backend: backend}).Delete(context.Background(), "work")
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			backend := newFakeKeyringBackend(nil)
+			backend.getErrors[entry] = tt.backendErr
+			backend.setError = tt.backendErr
+			backend.deleteErrors[entry] = tt.backendErr
+
+			err := tt.run(backend)
+			assertAuthError(t, err, "KEYRING_MIGRATION_REQUIRED")
+			if !errors.Is(err, tt.backendErr) {
+				t.Errorf("error = %v, want wrapped backend signal %v", err, tt.backendErr)
+			}
+			var typed *errx.Error
+			if !errors.As(err, &typed) {
+				t.Fatal("error is not an *errx.Error")
+			}
+			wantHint := "run 'trello-cli auth migrate-keychain --account work'"
+			if typed.Hint != wantHint {
+				t.Errorf("hint = %q, want %q", typed.Hint, wantHint)
+			}
+			for _, forbidden := range []string{apiKeySentinel, tokenSentinel} {
+				if strings.Contains(err.Error()+typed.Hint, forbidden) {
+					t.Errorf("protected-operation error disclosed credential sentinel %q", forbidden)
+				}
+			}
+		})
+	}
+}
+
 func TestKeyringStoreReportsRawNonJSONAsCorruptWithoutDisclosingIt(t *testing.T) {
 	rawSentinel := "raw-credential-must-not-appear"
 	entry := backendEntry{service: KeyringService, account: entryName("work")}
@@ -491,6 +782,12 @@ func TestCancelledContextStopsKeychainAccess(t *testing.T) {
 			name: "delete",
 			run: func(ctx context.Context, store KeyringStore) error {
 				return store.Delete(ctx, "work")
+			},
+		},
+		{
+			name: "migrate",
+			run: func(ctx context.Context, store KeyringStore) error {
+				return store.MigrateKeychain(ctx, "work")
 			},
 		},
 	}

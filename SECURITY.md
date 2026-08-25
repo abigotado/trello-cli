@@ -37,13 +37,16 @@ immediate and costs you one `trello-cli auth login`.
 The native backend calls Security.framework `SecItem` APIs directly and never
 delegates credential access to a subprocess. Service, account, and wire-format
 identifiers remain compatible with existing `go-keyring` entries. An older
-creator-only item may require one explicit `auth login`; macOS may show an
-authorization prompt for each older item it migrates. New and migrated items
-use a stable allow-any-application ACL; this is consistent with same-user
-processes being outside the threat model. Every other operation—including
-reads, deletes, ordinary saves, and rename—disables authentication UI and
-fails closed. A
-CGO-disabled Darwin build is environment-only.
+creator-only item may require explicit migration. `auth migrate-keychain`
+changes only the ACL of the exact entry and never reads or rewrites its value;
+`auth login` may migrate while replacing the value supplied by the user. macOS
+may show an authorization prompt for each older item either command migrates.
+New and migrated items use a stable allow-any-application ACL; this is
+consistent with same-user processes being outside the threat model. Every other
+operation—including reads, deletes, ordinary saves, and rename—disables
+authentication UI and fails closed with an account-specific migration hint. A
+blocked or canceled explicit migration also keeps the exact account in its
+recovery hint. A CGO-disabled Darwin build is environment-only.
 
 ## macOS distribution integrity
 
@@ -73,9 +76,9 @@ no supported installer runs `xattr` or otherwise bypasses Gatekeeper.
 - A macOS credential path that invokes `/usr/bin/security`, a password-manager
   helper, or another subprocess instead of Security.framework `SecItem` APIs.
 - A macOS keychain query that can open authentication UI instead of returning a
-  typed failure to an unattended caller. The sole exception is an explicit
-  `auth login`, which may request authorization to replace affected older
-  creator-only item ACLs.
+  typed failure to an unattended caller. The only exceptions are explicit
+  `auth login`, which may migrate while replacing the user-supplied value, and
+  `auth migrate-keychain`, which changes only affected creator-only item ACLs.
 - A release or installer path that distributes an unsigned prebuilt Darwin
   executable or removes Gatekeeper quarantine instead of building from source.
 

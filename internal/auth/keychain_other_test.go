@@ -3,6 +3,7 @@
 package auth
 
 import (
+	"context"
 	"errors"
 	"testing"
 
@@ -40,4 +41,9 @@ func TestTranslateGoKeyringError(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestOtherPlatformMigrationReturnsTypedUnavailable(t *testing.T) {
+	err := (KeyringStore{}).MigrateKeychain(context.Background(), "work")
+	assertAuthError(t, err, "KEYRING_MIGRATION_UNAVAILABLE")
 }

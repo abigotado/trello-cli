@@ -150,6 +150,8 @@ const (
 	keychainStatusSuccess       int64  = int64(C.errSecSuccess)
 	keychainStatusDuplicateItem int64  = int64(C.errSecDuplicateItem)
 	keychainStatusItemNotFound  int64  = int64(C.errSecItemNotFound)
+	keychainStatusNoInteraction int64  = int64(C.errSecInteractionNotAllowed)
+	keychainStatusUserCanceled  int64  = int64(C.errSecUserCanceled)
 	keychainPromptRequirePass   uint16 = uint16(C.kSecKeychainPromptRequirePassphase)
 )
 
@@ -192,6 +194,8 @@ type loginSaveOperations struct {
 }
 
 type resolveKeychainItem[T any] func() (T, func(), int64)
+
+type migrateKeychainItem func() (bool, error)
 
 func platformKeyringBackend() keyringBackend { return securityFrameworkBackend{} }
 
@@ -252,11 +256,15 @@ func (backend securityFrameworkBackend) set(ctx context.Context, service, accoun
 		return err
 	}
 	defer release()
-	var addErr error
+	var (
+		addErr     error
+		contextErr error
+	)
 	err = updateOrAddKeychainItem(
 		func() int64 {
-			if ctx.Err() != nil {
-				return int64(C.errSecUserCanceled)
+			if err := ctx.Err(); err != nil {
+				contextErr = err
+				return keychainStatusUserCanceled
 			}
 			return withResolvedKeychainItem(
 				backend.resolveItemHandle(refs.service, refs.account),
@@ -266,8 +274,9 @@ func (backend securityFrameworkBackend) set(ctx context.Context, service, accoun
 			)
 		},
 		func() int64 {
-			if ctx.Err() != nil {
-				return int64(C.errSecUserCanceled)
+			if err := ctx.Err(); err != nil {
+				contextErr = err
+				return keychainStatusUserCanceled
 			}
 			access, releaseAccess, accessErr := makeAllowAnyAccess(refs.service)
 			if accessErr != nil {
@@ -280,6 +289,9 @@ func (backend securityFrameworkBackend) set(ctx context.Context, service, accoun
 	)
 	if addErr != nil {
 		return addErr
+	}
+	if contextErr != nil {
+		return contextErr
 	}
 	return err
 }
@@ -321,6 +333,40 @@ func (backend securityFrameworkBackend) setForLogin(ctx context.Context, service
 		},
 	}
 	return saveForLoginWithPolicy(operations)
+}
+
+func (backend securityFrameworkBackend) migrate(ctx context.Context, service, primaryAccount, legacyAccount string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	serviceRef, releaseService, err := makeCFString(service)
+	if err != nil {
+		return err
+	}
+	defer releaseService()
+	primaryRef, releasePrimary, err := makeCFString(primaryAccount)
+	if err != nil {
+		return err
+	}
+	defer releasePrimary()
+	legacyRef, releaseLegacy, err := makeOptionalCFString(legacyAccount)
+	if err != nil {
+		return err
+	}
+	defer releaseLegacy()
+
+	var migrateLegacy migrateKeychainItem
+	if legacyRef != 0 {
+		migrateLegacy = func() (bool, error) {
+			return backend.migrateExactItem(ctx, serviceRef, legacyRef)
+		}
+	}
+	return migrateKeychainItems(
+		func() (bool, error) {
+			return backend.migrateExactItem(ctx, serviceRef, primaryRef)
+		},
+		migrateLegacy,
+	)
 }
 
 func (backend securityFrameworkBackend) delete(ctx context.Context, service, account string) error {
@@ -462,6 +508,25 @@ func (backend securityFrameworkBackend) migrateExistingAccess(item C.SecKeychain
 	}
 	status = C.SecKeychainItemSetAccess(item, access)
 	return translateKeychainStatus("set access", int64(status))
+}
+
+func (backend securityFrameworkBackend) migrateExactItem(ctx context.Context, service, account C.CFStringRef) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	item, releaseItem, status := backend.resolveItem(service, account)
+	switch status {
+	case keychainStatusItemNotFound:
+		return false, nil
+	case keychainStatusSuccess:
+		defer releaseItem()
+	default:
+		return false, translateKeychainStatus("resolve", status)
+	}
+	if err := ctx.Err(); err != nil {
+		return true, err
+	}
+	return true, backend.migrateExistingAccess(item)
 }
 
 func (backend securityFrameworkBackend) resolveItem(service, account C.CFStringRef) (C.SecKeychainItemRef, func(), int64) {
@@ -614,6 +679,24 @@ func isKeychainRace(err error) bool {
 	return errors.Is(err, errKeyringNotFound) || errors.Is(err, errKeyringDuplicate)
 }
 
+func migrateKeychainItems(primary, legacy migrateKeychainItem) error {
+	found := false
+	for _, migrate := range []migrateKeychainItem{primary, legacy} {
+		if migrate == nil {
+			continue
+		}
+		exists, err := migrate()
+		if err != nil {
+			return err
+		}
+		found = found || exists
+	}
+	if !found {
+		return errKeyringNotFound
+	}
+	return nil
+}
+
 func translateKeychainStatus(operation string, status int64) error {
 	switch status {
 	case keychainStatusSuccess:
@@ -622,6 +705,10 @@ func translateKeychainStatus(operation string, status int64) error {
 		return errKeyringDuplicate
 	case keychainStatusItemNotFound:
 		return errKeyringNotFound
+	case keychainStatusNoInteraction:
+		return errKeyringInteractionNotAllowed
+	case keychainStatusUserCanceled:
+		return errKeyringUserCanceled
 	default:
 		return &keychainStatusError{operation: operation, status: status}
 	}

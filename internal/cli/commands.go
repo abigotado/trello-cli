@@ -68,6 +68,7 @@ func (a *App) newAuthCommand() *cobra.Command {
 	}
 	cmd.AddCommand(
 		a.newAuthLoginCommand(),
+		a.newAuthMigrateKeychainCommand(),
 		a.newAuthStatusCommand(),
 		a.newAuthListCommand(),
 		a.newAuthDefaultCommand(),
@@ -75,6 +76,47 @@ func (a *App) newAuthCommand() *cobra.Command {
 		a.newAuthLogoutCommand(),
 	)
 	return cmd
+}
+
+func (a *App) newAuthMigrateKeychainCommand() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "migrate-keychain",
+		Short: "Make an existing macOS Keychain entry usable across CLI rebuilds",
+		Long: "Make an existing macOS Keychain entry usable across CLI rebuilds.\n\n" +
+			"This changes only the access policy of the exact entry for --account; it\n" +
+			"never reads or rewrites the stored API key or token. For the default\n" +
+			"account, the compatible legacy entry is migrated too when present. macOS\n" +
+			"may request authorization once per affected older item. Re-running this\n" +
+			"command after migration is safe and reports the same compatible state.",
+		Args: cobra.NoArgs,
+		Annotations: map[string]string{
+			annotationMutates: "true",
+		},
+	}
+	return a.newCommand(cmd, func(ctx context.Context, _ *cobra.Command, _ []string) error {
+		name, err := a.targetAccount()
+		if err != nil {
+			return err
+		}
+		if a.dryRun {
+			return a.plan("auth migrate-keychain", map[string]string{"account": name}, nil)
+		}
+		migrationStore, ok := a.store.(auth.MigrationStore)
+		if !ok {
+			return errx.Auth(
+				"KEYRING_MIGRATION_UNAVAILABLE",
+				"keychain access migration is unavailable for account %q",
+				name,
+			).WithHint("run 'trello-cli auth login --account %s'", name)
+		}
+		if err := migrationStore.MigrateKeychain(ctx, name); err != nil {
+			return err
+		}
+		return a.out.Success(keychainMigrationView{
+			Account:        name,
+			KeychainAccess: "compatible",
+		})
+	})
 }
 
 // targetAccount returns the account a management command should act on.

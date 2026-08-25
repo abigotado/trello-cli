@@ -43,7 +43,7 @@ returns everything and never reports `truncated` true.
 | 2 | usage or validation error | fix the flags | `error.message` names the bad or missing flag |
 | 3 | nothing matched | check the name | re-run with a name from `error.did_you_mean`, or list the objects |
 | 4 | several objects matched | pick from candidates | re-run with `--board-id`, `--list-id`, or `--card-id` from `error.candidates` |
-| 5 | missing or rejected credentials | re-authenticate | stop and ask the user to run `trello-cli auth login` |
+| 5 | credentials need user action | follow `hint` | ask the user to run the exact `auth login` or `auth migrate-keychain` command in `hint` |
 | 6 | rate limited or network failure | back off and retry | wait `error.retry_after` if present, else back off yourself |
 | 7 | destructive operation not confirmed | add `--yes` | only after the user has agreed |
 
@@ -112,8 +112,12 @@ Precedence: `--account NAME`, then `TRELLO_API_KEY` plus `TRELLO_TOKEN`, then
 exactly one exists. `trello-cli auth list` shows the names; name one on every
 call when more than one exists.
 
-Never print, log, or paste an API key or token. On exit 5, ask the user to
-authenticate; do not go looking for credentials yourself.
+Never print, log, or paste an API key or token. On exit 5, follow `hint` and ask
+the user to take that action. In particular, `KEYRING_MIGRATION_REQUIRED` means
+running the account-specific `auth migrate-keychain` command, not re-entering or
+looking for credentials yourself. If migration is blocked or canceled, ask the
+user to follow its exact account-specific hint from an interactive macOS
+session.
 
 ## Output economy
 

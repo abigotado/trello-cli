@@ -32,7 +32,7 @@ would be the same as an existing code's, it belongs in `error.code` instead.
 | 2 | `USAGE` | usage or validation error | fix the flags |
 | 3 | `NOT_FOUND` | nothing matched | check the name; see did_you_mean |
 | 4 | `AMBIGUOUS` | several objects matched | pick from candidates |
-| 5 | `AUTH` | missing or rejected credentials | re-authenticate |
+| 5 | `AUTH` | credentials need user action | follow the hint |
 | 6 | `RETRYABLE` | rate limited or network failure | back off and retry |
 | 7 | `CONFIRMATION_REQUIRED` | destructive operation not confirmed | add --yes |
 

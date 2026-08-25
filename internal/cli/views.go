@@ -44,6 +44,19 @@ type accountView struct {
 	Default      bool        `json:"default"`
 }
 
+// keychainMigrationView reports only the non-secret access-policy outcome.
+type keychainMigrationView struct {
+	Account        string `json:"account"`
+	KeychainAccess string `json:"keychainAccess"`
+}
+
+func (v keychainMigrationView) Fields() []output.Field {
+	return []output.Field{
+		{Name: "account", Value: v.Account, Raw: v.Account},
+		{Name: "keychainAccess", Value: v.KeychainAccess, Raw: v.KeychainAccess},
+	}
+}
+
 // Credential is how far a command got in establishing that an account is
 // usable.
 type Credential string
