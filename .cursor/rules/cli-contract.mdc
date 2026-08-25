@@ -59,7 +59,7 @@ new one is justified; if the caller's next move is the same, it is a new
 | 2 | usage / validation | fix flags |
 | 3 | not found | check the name; `did_you_mean` is in the envelope |
 | 4 | ambiguous | pick from `candidates` |
-| 5 | auth | re-authenticate |
+| 5 | credentials need user action | follow the exact `hint` |
 | 6 | retryable (rate limit, network) | back off, retry |
 | 7 | confirmation required | add `--yes` |
 

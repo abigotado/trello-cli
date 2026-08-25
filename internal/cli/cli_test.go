@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"runtime/debug"
 	"strconv"
@@ -36,6 +37,7 @@ type harness struct {
 
 type fakeStore struct {
 	creds          auth.Credentials
+	loadErr        error
 	deleted        bool
 	saved          *auth.Credentials
 	savedAccount   string
@@ -45,7 +47,7 @@ type fakeStore struct {
 
 func (f *fakeStore) Load(_ context.Context, account string) (auth.Credentials, error) {
 	f.loadedAccount = account
-	return f.creds, nil
+	return f.creds, f.loadErr
 }
 func (f *fakeStore) Save(_ context.Context, account string, c auth.Credentials) error {
 	f.savedAccount = account
@@ -76,6 +78,43 @@ func (m *memStore) Save(_ context.Context, account string, c auth.Credentials) e
 func (m *memStore) Delete(_ context.Context, account string) error {
 	delete(m.creds, account)
 	return nil
+}
+
+type loginCapabilityStore struct {
+	*memStore
+	saveCalls         int
+	saveForLoginCalls int
+}
+
+func newLoginCapabilityStore() *loginCapabilityStore {
+	return &loginCapabilityStore{memStore: newMemStore()}
+}
+
+func (s *loginCapabilityStore) Save(ctx context.Context, account string, creds auth.Credentials) error {
+	s.saveCalls++
+	return s.memStore.Save(ctx, account, creds)
+}
+
+func (s *loginCapabilityStore) SaveForLogin(ctx context.Context, account string, creds auth.Credentials) error {
+	s.saveForLoginCalls++
+	return s.memStore.Save(ctx, account, creds)
+}
+
+// migrationCapabilityStore intentionally implements MigrationStore but not
+// LoginStore. The migration command must depend only on its narrow capability.
+type migrationCapabilityStore struct {
+	*fakeStore
+	err      error
+	accounts []string
+}
+
+func newMigrationCapabilityStore() *migrationCapabilityStore {
+	return &migrationCapabilityStore{fakeStore: &fakeStore{}}
+}
+
+func (s *migrationCapabilityStore) MigrateKeychain(_ context.Context, account string) error {
+	s.accounts = append(s.accounts, account)
+	return s.err
 }
 
 func newHarness(t *testing.T, envs map[string]string, store auth.Store) *harness {
@@ -395,6 +434,237 @@ func TestAuthLoginStoresTheGivenCredentials(t *testing.T) {
 	// The success envelope must not contain the token it just stored.
 	if strings.Contains(h.out()+h.err(), "tok-1") {
 		t.Error("login echoed the stored token")
+	}
+}
+
+func TestAuthLoginUsesLoginCapabilityAndRenameUsesOrdinarySave(t *testing.T) {
+	const tokenSentinel = "login-capability-token-sentinel"
+	store := newLoginCapabilityStore()
+	h := newHarness(t, nil, store)
+
+	if got := h.run("--account", "old", "auth", "login", "--api-key", "login-key", "--token", tokenSentinel); got != errx.CodeOK {
+		t.Fatalf("login exit code = %d, want 0", got)
+	}
+	if store.saveForLoginCalls != 1 || store.saveCalls != 0 {
+		t.Errorf("login calls: SaveForLogin = %d, Save = %d; want 1/0", store.saveForLoginCalls, store.saveCalls)
+	}
+	if strings.Contains(h.out()+h.err(), tokenSentinel) {
+		t.Error("login output disclosed the token sentinel")
+	}
+
+	if got := h.run("auth", "rename", "old", "new"); got != errx.CodeOK {
+		t.Fatalf("rename exit code = %d, want 0", got)
+	}
+	if store.saveForLoginCalls != 1 || store.saveCalls != 1 {
+		t.Errorf("after rename calls: SaveForLogin = %d, Save = %d; want 1/1", store.saveForLoginCalls, store.saveCalls)
+	}
+	if strings.Contains(h.out()+h.err(), tokenSentinel) {
+		t.Error("rename output disclosed the token sentinel")
+	}
+}
+
+func TestAuthMigrateKeychainUsesOnlyMigrationCapabilityAndReturnsExactEnvelope(t *testing.T) {
+	tests := []struct {
+		name        string
+		args        []string
+		wantAccount string
+	}{
+		{
+			name:        "default account",
+			args:        []string{"auth", "migrate-keychain"},
+			wantAccount: auth.DefaultAccount,
+		},
+		{
+			name:        "named account",
+			args:        []string{"--account", "work", "auth", "migrate-keychain"},
+			wantAccount: "work",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := newMigrationCapabilityStore()
+			store.creds = auth.Credentials{APIKey: "key-value-must-not-be-read", Token: "token-value-must-not-be-read"}
+			h := newHarness(t, nil, store)
+
+			if got := h.run(tt.args...); got != errx.CodeOK {
+				t.Fatalf("exit code = %d, want 0\nstdout: %s\nstderr: %s", got, h.out(), h.err())
+			}
+			if !reflect.DeepEqual(store.accounts, []string{tt.wantAccount}) {
+				t.Errorf("migrated accounts = %v, want [%s]", store.accounts, tt.wantAccount)
+			}
+			if store.loadedAccount != "" || store.saved != nil || store.deleted {
+				t.Error("migration used an ordinary credential store operation")
+			}
+
+			var gotEnvelope map[string]any
+			if err := json.Unmarshal([]byte(h.out()), &gotEnvelope); err != nil {
+				t.Fatalf("bad envelope: %v\n%s", err, h.out())
+			}
+			wantEnvelope := map[string]any{
+				"ok": true,
+				"v":  float64(errx.EnvelopeVersion),
+				"data": map[string]any{
+					"account":        tt.wantAccount,
+					"keychainAccess": "compatible",
+				},
+			}
+			if !reflect.DeepEqual(gotEnvelope, wantEnvelope) {
+				t.Errorf("envelope = %#v, want %#v", gotEnvelope, wantEnvelope)
+			}
+			for _, forbidden := range []string{
+				"key-value-must-not-be-read",
+				"token-value-must-not-be-read",
+				"apiKeySuffix",
+				"tokenFingerprint",
+				`"api_key"`,
+				`"token"`,
+			} {
+				if strings.Contains(h.out()+h.err(), forbidden) {
+					t.Errorf("migration output contains forbidden credential material or field %q", forbidden)
+				}
+			}
+		})
+	}
+}
+
+func TestAuthMigrateKeychainErrorsKeepEnvelopeV1AndExactHints(t *testing.T) {
+	tests := []struct {
+		name        string
+		err         error
+		wantCode    string
+		wantMessage string
+		wantHint    string
+	}{
+		{
+			name:        "missing entry",
+			err:         errx.Auth("KEYRING_ENTRY_NOT_FOUND", "no stored keychain entry exists for account %q", "work").WithHint("run 'trello-cli auth login --account work'"),
+			wantCode:    "KEYRING_ENTRY_NOT_FOUND",
+			wantMessage: `no stored keychain entry exists for account "work"`,
+			wantHint:    "run 'trello-cli auth login --account work'",
+		},
+		{
+			name:        "interaction requires explicit migration",
+			err:         errx.Auth("KEYRING_MIGRATION_REQUIRED", "stored keychain access for account %q requires migration", "work").WithHint("run 'trello-cli auth migrate-keychain --account work'"),
+			wantCode:    "KEYRING_MIGRATION_REQUIRED",
+			wantMessage: `stored keychain access for account "work" requires migration`,
+			wantHint:    "run 'trello-cli auth migrate-keychain --account work'",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := newMigrationCapabilityStore()
+			store.err = tt.err
+			h := newHarness(t, nil, store)
+
+			if got := h.run("--account", "work", "auth", "migrate-keychain"); got != errx.CodeAuth {
+				t.Fatalf("exit code = %d, want %d\nstdout: %s", got, errx.CodeAuth, h.out())
+			}
+			var gotEnvelope map[string]any
+			if err := json.Unmarshal([]byte(h.out()), &gotEnvelope); err != nil {
+				t.Fatalf("bad envelope: %v\n%s", err, h.out())
+			}
+			wantEnvelope := map[string]any{
+				"ok": false,
+				"v":  float64(errx.EnvelopeVersion),
+				"error": map[string]any{
+					"code":    tt.wantCode,
+					"message": tt.wantMessage,
+				},
+				"hint": tt.wantHint,
+			}
+			if !reflect.DeepEqual(gotEnvelope, wantEnvelope) {
+				t.Errorf("envelope = %#v, want %#v", gotEnvelope, wantEnvelope)
+			}
+			if !reflect.DeepEqual(store.accounts, []string{"work"}) {
+				t.Errorf("migrated accounts = %v, want [work]", store.accounts)
+			}
+		})
+	}
+}
+
+func TestAuthMigrateKeychainDryRunNeverTouchesTheStore(t *testing.T) {
+	tests := []struct {
+		name  string
+		store auth.Store
+	}{
+		{name: "migration-capable store", store: newMigrationCapabilityStore()},
+		{name: "unsupported store", store: &fakeStore{}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newHarness(t, nil, tt.store)
+			if got := h.run("--dry-run", "--account", "work", "auth", "migrate-keychain"); got != errx.CodeOK {
+				t.Fatalf("exit code = %d, want 0\nstdout: %s", got, h.out())
+			}
+			if store, ok := tt.store.(*migrationCapabilityStore); ok && len(store.accounts) != 0 {
+				t.Errorf("dry run migrated accounts %v", store.accounts)
+			}
+			if !strings.Contains(h.out(), `"action": "auth migrate-keychain"`) || !strings.Contains(h.out(), `"account": "work"`) {
+				t.Errorf("dry-run plan omitted action or target account:\n%s", h.out())
+			}
+		})
+	}
+}
+
+func TestAuthMigrateKeychainReadOnlyAndNoArgsGateBeforeStoreAccess(t *testing.T) {
+	tests := []struct {
+		name string
+		env  map[string]string
+		args []string
+	}{
+		{
+			name: "read-only mode blocks migration",
+			env:  map[string]string{"TRELLO_CLI_READONLY": "1"},
+			args: []string{"auth", "migrate-keychain"},
+		},
+		{
+			name: "extra argument is rejected by NoArgs",
+			args: []string{"auth", "migrate-keychain", "extra"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := newMigrationCapabilityStore()
+			h := newHarness(t, tt.env, store)
+			if got := h.run(tt.args...); got != errx.CodeUsage {
+				t.Errorf("exit code = %d, want %d\nstdout: %s", got, errx.CodeUsage, h.out())
+			}
+			if len(store.accounts) != 0 {
+				t.Errorf("gated command migrated accounts %v", store.accounts)
+			}
+		})
+	}
+}
+
+func TestAuthMigrateKeychainUnsupportedStoreReturnsExactAuthError(t *testing.T) {
+	h := newHarness(t, nil, &fakeStore{})
+	if got := h.run("--account", "work", "auth", "migrate-keychain"); got != errx.CodeAuth {
+		t.Fatalf("exit code = %d, want %d\nstdout: %s", got, errx.CodeAuth, h.out())
+	}
+	var envelope struct {
+		OK    bool `json:"ok"`
+		V     int  `json:"v"`
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+		Hint string `json:"hint"`
+	}
+	if err := json.Unmarshal([]byte(h.out()), &envelope); err != nil {
+		t.Fatalf("bad envelope: %v\n%s", err, h.out())
+	}
+	if envelope.OK || envelope.V != errx.EnvelopeVersion || envelope.Error.Code != "KEYRING_MIGRATION_UNAVAILABLE" {
+		t.Errorf("envelope = %+v, want v1 KEYRING_MIGRATION_UNAVAILABLE", envelope)
+	}
+	if envelope.Error.Message != `keychain access migration is unavailable for account "work"` {
+		t.Errorf("message = %q", envelope.Error.Message)
+	}
+	if envelope.Hint != "run 'trello-cli auth login --account work'" {
+		t.Errorf("hint = %q", envelope.Hint)
 	}
 }
 
@@ -1570,6 +1840,7 @@ func TestReadOnlyBlocksEveryMutatingCommand(t *testing.T) {
 		{"checklists", "toggle", "--card-id", "c1", "--item-id", "i1"},
 		{"attachments", "add", "--card-id", "c1", "--url", "https://example.com"},
 		{"auth", "login", "--api-key", "k", "--token", "t"},
+		{"auth", "migrate-keychain"},
 		{"auth", "logout"},
 	}
 	for _, args := range commands {
@@ -1730,9 +2001,9 @@ func TestAuthListEnumeratesAccountsAndMarksTheDefault(t *testing.T) {
 	}
 }
 
-// Listing accounts must not touch the keychain. On macOS an unsigned binary
-// raises a modal prompt per account, and an agent calling this to discover
-// accounts would hang on the first invisible dialog.
+// Listing accounts must not touch the keychain. It is a metadata query; making
+// one protected store call per account would add failure modes without making
+// the list of names more accurate.
 func TestAuthListDoesNotReadTheKeychainByDefault(t *testing.T) {
 	store := &fakeStore{creds: auth.Credentials{APIKey: "abcd1234", Token: "tok"}}
 	h := newHarness(t, nil, store)
@@ -1759,6 +2030,39 @@ func TestAuthListDoesNotReadTheKeychainByDefault(t *testing.T) {
 	}
 	if store.loadedAccount == "" {
 		t.Error("--check did not verify any account")
+	}
+}
+
+func TestAuthListCheckPropagatesKeychainMigrationGuidance(t *testing.T) {
+	store := &fakeStore{creds: auth.Credentials{APIKey: "key", Token: "token"}}
+	h := newHarness(t, nil, store)
+	if got := h.run("--account", "work", "auth", "login", "--api-key", "key", "--token", "token"); got != errx.CodeOK {
+		t.Fatalf("login exit code = %d", got)
+	}
+	store.loadErr = errx.Auth(
+		"KEYRING_MIGRATION_REQUIRED",
+		"stored keychain access for account %q requires migration",
+		"work",
+	).WithHint("run 'trello-cli auth migrate-keychain --account work'")
+
+	if got := h.run("auth", "list", "--check"); got != errx.CodeAuth {
+		t.Fatalf("exit code = %d, want %d\nstdout: %s", got, errx.CodeAuth, h.out())
+	}
+	var envelope struct {
+		OK    bool `json:"ok"`
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+		Hint string `json:"hint"`
+	}
+	if err := json.Unmarshal([]byte(h.out()), &envelope); err != nil {
+		t.Fatalf("bad envelope: %v\n%s", err, h.out())
+	}
+	if envelope.OK || envelope.Error.Code != "KEYRING_MIGRATION_REQUIRED" {
+		t.Errorf("envelope = %+v, want migration-required error", envelope)
+	}
+	if want := "run 'trello-cli auth migrate-keychain --account work'"; envelope.Hint != want {
+		t.Errorf("hint = %q, want %q", envelope.Hint, want)
 	}
 }
 
@@ -2040,7 +2344,7 @@ func TestBuildVersionReadsTheStamp(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := buildVersion(func() (*debug.BuildInfo, bool) { return tt.info, tt.ok })
+			got := buildVersion(func() (*debug.BuildInfo, bool) { return tt.info, tt.ok }, devVersion)
 			if got.Version != tt.wantVer {
 				t.Errorf("version = %q, want %q", got.Version, tt.wantVer)
 			}

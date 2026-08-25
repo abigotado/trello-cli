@@ -198,7 +198,7 @@ func Inexact(kind, query string, candidates []Candidate) *Error {
 	}
 }
 
-// Auth reports missing, rejected, or expired credentials.
+// Auth reports a credential condition that requires the user action in Hint.
 func Auth(reason, format string, args ...any) *Error {
 	return &Error{
 		Code:    CodeAuth,

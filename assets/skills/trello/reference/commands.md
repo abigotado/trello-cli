@@ -110,6 +110,12 @@ Remove one account's stored credentials
 
 No flags of its own.
 
+### `trello-cli auth migrate-keychain`  **W**
+
+Make an existing macOS Keychain entry usable across CLI rebuilds
+
+No flags of its own.
+
 ### `trello-cli auth rename`  **W**
 
 Move an account's stored credentials to a different name

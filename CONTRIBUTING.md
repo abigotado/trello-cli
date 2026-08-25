@@ -25,6 +25,11 @@ go build ./...
 .githooks/install
 ```
 
+On macOS, a normal source build uses cgo and the macOS SDK so the credential
+backend can call Security.framework directly. `CGO_ENABLED=0` still compiles a
+Darwin binary, but that binary is environment-only and cannot use stored
+credentials. Linux and Windows retain their `go-keyring` platform backends.
+
 `.githooks/install` points `core.hooksPath` at `.githooks/`, so the pre-push
 hook runs the gate before anything leaves your machine. It mutates local Git
 config, which is why it is a deliberate opt-in rather than something the repo
@@ -129,12 +134,23 @@ Two specifics worth knowing before you write the code:
 
 Every behavior change needs a test that fails without the change.
 
-Test at boundaries, not internals: `net/http/httptest` for HTTP,
-`keyring.MockInit()` for the keychain, `t.TempDir()` for the filesystem,
+Test at boundaries, not internals: `net/http/httptest` for HTTP, an injected
+fake credential store for the keychain, `t.TempDir()` for the filesystem, and
 `t.Setenv()` for the environment. A test that reaches the real Trello API, the
-real OS keychain, or your home directory will not be merged — on a Linux runner
-`go-keyring` needs D-Bus and hangs or fails, and on macOS it raises a modal
-prompt that CI cannot answer.
+real OS keychain, or your home directory will not be merged. In particular,
+ordinary macOS tests must not exercise Security.framework against the
+developer's keychain.
+
+The one native exception is the build-tagged cross-binary Keychain integration
+check in CI. The helper at
+`internal/auth/keychainintegration/cmd/keychain-helper` exists only under the
+`keychainintegration` build tag. It uses a synthetic marker with two newly
+created disposable Keychains: A is the explicit `kSecMatchSearchList` target
+containing the existing item, while B is the explicit `kSecUseKeychain` add
+target. The second test binary unlocks both. The check never changes the
+default keychain or the user's search list, never prints the marker, and cleans
+up both Keychains on every exit path. Keep those properties if the helper
+changes.
 
 Do not weaken an assertion to make a failing test pass. Report the failure.
 
@@ -161,11 +177,28 @@ think one has already leaked.
   dependency upgrades do not ride along with a feature — Dependabot owns the
   last two.
 
+## macOS distribution
+
+Do not add a prebuilt Darwin target or Homebrew cask to GoReleaser. Without a
+Developer ID signature and Apple notarization, a downloaded executable is not a
+supported macOS distribution, and clearing `com.apple.quarantine` is never an
+acceptable substitute.
+
+The planned macOS Homebrew package will be a Formula built locally from a
+SHA-256-pinned tag archive with `CGO_ENABLED=1`. Adding or updating it is
+necessarily a two-repository operation: first merge and tag the `trello-cli`
+source, then update `abigotado/homebrew-tap` with the immutable tag URL and its
+exact checksum. The Formula must inject the tag through
+`internal/cli.releaseVersion`, verify the machine contract, check
+Security.framework linkage, and reject a binary that contains
+`/usr/bin/security`. Never point a stable Formula at a branch, placeholder
+version, or mutable URL.
+
 ## What CI enforces
 
 | Workflow | Check | Enforces |
 | --- | --- | --- |
-| `go` | Build and test | `gofmt`, `go vet`, `go build`, `go test -race`, `goreleaser check`, `actionlint` with shellcheck over `.github/workflows`, and that `go generate` produces no diff |
+| `go` | Build and test | `gofmt`, `go vet`, `go build`, and `go test -race` on Linux and native macOS; a macOS `CGO_ENABLED=0` suite and isolated cross-binary disposable-keychain check; Ubuntu-only `goreleaser check`, a Linux/Windows release rehearsal that rejects Darwin or Homebrew artifacts, `actionlint` with shellcheck over `.github/workflows`, and verification that `go generate` produces no diff |
 | `agent harness` | Harness consistency | `.claude/`/`.codex/` stay untracked, Cursor mirrors are in sync, harness unit tests pass |
 
 Both are required to merge into `main`. If you contribute from a fork, the

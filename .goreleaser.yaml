@@ -1,13 +1,9 @@
-# Release pipeline. Rehearse with `goreleaser release --skip=publish --clean` on
-# a clean tagged tree: --snapshot skips the changelog pipe entirely, so it does
-# not exercise the notes the real release will carry. release.footer is still
-# rendered only at publish time.
-#
-# There are deliberately no -X ldflags. Go stamps the version, revision, and
-# commit time into the binary from VCS with no build flags at all, and that
-# stamping survives -trimpath and -s -w. An -X value would only ever reach a
-# binary goreleaser itself built, so every `go install` user — the install path
-# the README leads with — would get a hardcoded placeholder forever.
+# Release pipeline for portable Linux and Windows archives. macOS is excluded:
+# the supported macOS distribution is built locally from source so the native
+# Security.framework credential backend is selected without shipping an
+# unsigned downloaded executable. A source-building Homebrew Formula is added
+# separately after each stable tag exists and its source archive can be pinned
+# by SHA-256.
 version: 2
 
 project_name: trello-cli
@@ -26,12 +22,13 @@ builds:
       - CGO_ENABLED=0
     flags:
       - -trimpath
-    # Listed explicitly to suppress goreleaser's default -X main.version flags,
-    # which this binary has no variables to receive.
+    # Source distributions cannot rely on VCS metadata being present. Release
+    # archives use the same fallback seam as the Homebrew Formula; a module
+    # version embedded by `go install` still takes precedence at runtime.
     ldflags:
-      - -s -w
+      - -s -w -X github.com/abigotado/trello-cli/internal/cli.releaseVersion=v{{ .Version }}
     mod_timestamp: "{{ .CommitTimestamp }}"
-    goos: [darwin, linux, windows]
+    goos: [linux, windows]
     goarch: [amd64, arm64]
 
 archives:
@@ -44,7 +41,6 @@ archives:
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     # LICENSE and README.md are literal on purpose. A literal path that does
     # not exist fails the release; a glob only logs a warning nobody reads.
-    # Shipping without a license should not be survivable.
     files:
       - LICENSE
       - README.md
@@ -54,106 +50,20 @@ checksum:
   name_template: "{{ .ProjectName }}_{{ .Version }}_checksums.txt"
   algorithm: sha256
 
-# A cask, not a formula. `brews:` is a hard deprecation as of goreleaser v2.16
-# and fails `goreleaser check` — which this pipeline runs before it releases, so
-# a formula config would abort the release rather than warn about it.
-#
-# A cask is not macOS-only, which is the part most guides still get wrong.
-# Homebrew's `binary` artifact is absent from MACOS_ONLY_ARTIFACTS, so the
-# on_linux block goreleaser emits is real and one entry covers darwin and linux
-# on both architectures. Windows is filtered out by the cask pipe and keeps
-# `go install` and the zip.
-homebrew_casks:
-  - name: trello-cli
-    ids: [trello-cli]
-    # Plural. Singular `binary:` is deprecated since v2.12.6 and fails check the
-    # same way `brews:` does.
-    binaries: [trello-cli]
-    homepage: https://github.com/abigotado/trello-cli
-    description: Manage Trello from the command line, or from an AI agent shelling out to it
-    # goreleaser writes this cask; it never pushes it. The push lives in
-    # .github/workflows/cask.yaml and waits for the GitHub release to be
-    # published, because the url fields below 404 for as long as the release is
-    # a draft — see the note on release.draft.
-    #
-    # Verified against goreleaser v2.17.1 with publishing fully enabled against
-    # a stub API: skip_upload is read in the publish stage, after the run stage
-    # has already written dist/homebrew/Casks/trello-cli.rb, and the early
-    # return happens before repository.token is resolved. The file is produced
-    # and the tap is not contacted at all.
-    #
-    # This replaces skip_upload: "auto", which held the cask back for -rc tags.
-    # The cask workflow's newest-stable-tag gate now covers that: an -rc tag is
-    # never the newest *stable* tag, so it cannot move what `brew install`
-    # resolves to. Deleting that gate would silently undo this.
-    #
-    # Flipping this back to "auto" or "false" does not restore the old
-    # behaviour: repository.token is gone, so goreleaser would fall back to the
-    # built-in GITHUB_TOKEN and 403 against the tap. Loud, but the reason
-    # belongs on the line someone would edit.
-    skip_upload: "true"
-    # Still load-bearing with nothing being pushed: the cask pipe skips
-    # generation entirely when repository.name is unset, and there would be no
-    # file to hand to the cask workflow.
-    #
-    # No token here. This run cannot reach the tap, so the release job does not
-    # hold a tap credential at all — HOMEBREW_TAP_TOKEN belongs to the one
-    # workflow that writes to homebrew-tap. That token is a fine-grained PAT
-    # scoped to the tap alone; the built-in GITHUB_TOKEN cannot write there at
-    # any permission level, since its scope ends at this repository and being
-    # the same owner does not help.
-    repository:
-      owner: abigotado
-      name: homebrew-tap
-    hooks:
-      post:
-        # Not optional. Homebrew quarantines everything a cask stages, and
-        # --no-quarantine was removed in brew 6.0.14. A quarantined,
-        # un-notarized binary is killed by the kernel on exec: verified against
-        # the v0.1.0 darwin/arm64 artifact, which exits 137 with zero bytes on
-        # both stdout and stderr. For a tool whose contract is "parse stdout,
-        # branch on the exit code", that is the worst possible failure, so a
-        # cask without this hook would be worse than shipping no cask at all.
-        install: |
-          if OS.mac?
-            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/trello-cli"]
-          end
-
 snapshot:
   version_template: "{{ incpatch .Version }}-next"
 
 changelog:
   # git, not github: no API call, so a local rehearsal produces the same notes
-  # the real release will.
-  #
-  # No sort key. Unset, goreleaser keeps git-log order, which is newest first.
-  # "asc" sorts alphabetically by commit subject rather than chronologically,
-  # which reads as if the history were shuffled.
+  # the real release will. Unset sort keeps git-log order, newest first.
   use: git
 
 release:
   # Draft while the pipeline is young: the artifact list gets inspected before
-  # it is public. Flip to false once it has proven itself.
-  #
-  # Homebrew no longer rides on that decision. The cask this run generates is
-  # attached to the release as trello-cli.rb and pushed to the tap by
-  # .github/workflows/cask.yaml, which waits for `release: published`. So
-  # publishing the draft is the act that ships the cask, and until then the tap
-  # keeps pointing at the previous version — one release behind, but installable.
-  #
-  # What that replaces: the cask used to be pushed during this run, pointing at
-  # download URLs that stay 404 for as long as the release is a draft. On v0.2.0
-  # the tap advertised a version nobody could install for 54 minutes (created
-  # 11:51Z, published 12:45Z). "Publish promptly" was the only thing standing
-  # between that and a user hitting it.
-  #
-  # Setting draft: false stays safe: the release job dispatches the cask
-  # workflow itself when the release is already public.
+  # it is public. Homebrew does not consume these prebuilt archives.
   draft: true
   prerelease: auto
   # A tag is immutable, so a job that dies mid-upload must be re-runnable.
-  # Without these, the retry fails on artifacts the first attempt already
-  # uploaded and the release stays half-populated behind a tag that cannot move.
   replace_existing_artifacts: true
   replace_existing_draft: true
   footer: |

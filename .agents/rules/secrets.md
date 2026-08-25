@@ -12,6 +12,15 @@ setting is hidden global state, two concurrent invocations would race over it,
 and the loser would silently act on the wrong board — the failure this tool is
 built to prevent everywhere else.
 
+The generic-password schema is compatibility-sensitive: service `trello-cli`,
+account `account:<name>`, plus the legacy `credentials` account read only for
+the default account. The macOS backend must read values previously written by
+`go-keyring` and write its compatible encoded form. Do not rename these
+identifiers as part of a backend refactor. While migrating an older entry,
+`auth login` may rewrite its ACL and compatible value without changing that
+schema. `auth migrate-keychain` is the zero-reentry path: it changes only the
+ACL of the exact entry and never reads or rewrites its credential value.
+
 Resolution order, most specific first. Explicit beats implicit, per-invocation
 beats stored:
 
@@ -21,16 +30,44 @@ beats stored:
 4. the stored default account
 5. the only account, when exactly one exists
 
-The order matters and is not arbitrary. On macOS a freshly rebuilt, unsigned
-binary triggers a modal keychain-access prompt; an agent shelling out to it
-would hang on an invisible dialog with no output. The environment path is the
-headless, CI, and agent path, and it must be reachable without touching the
-keychain at all.
+The order matters and is not arbitrary. The environment path is the headless,
+CI, and agent path, and it must be reachable without touching the keychain at
+all. On macOS, native keychain queries disable authentication UI and return a
+typed failure when access would require it. The only exceptions are explicit
+`auth login` and `auth migrate-keychain` migrations; CGO-disabled builds have
+only the environment path.
 
 Credentials are **never** written to a config file, a cache file, a log, or the
 repository. `internal/config` holds defaults; it does not hold secrets. The
 account registry under the user config directory holds account *names* only —
 a keychain cannot be enumerated, which is the sole reason that file exists.
+
+On macOS, the store calls Security.framework `SecItem` APIs directly. Never
+use `/usr/bin/security`, `go-keyring`, `os/exec`, or another subprocess
+credential path in the Darwin backend. Reads, deletes, ordinary saves, and
+rename operations set `kSecUseAuthenticationUIFail`, so access that would
+require UI returns a typed failure rather than leaving an agent blocked behind
+an invisible prompt. `auth login` may explicitly authorize replacement of an
+older creator-only `go-keyring` item while writing the user-supplied value.
+`auth migrate-keychain` authorizes the same ACL-only change without reading or
+rewriting the value. macOS may show one prompt per affected item during either
+explicit migration. New and migrated items use a stable allow-any-application
+ACL. An ordinary `errSecInteractionNotAllowed` becomes the typed
+`KEYRING_MIGRATION_REQUIRED` failure with the exact account-specific migration
+command; it never falls through to another account. For the default account,
+explicit migration considers `account:default` first and then the legacy
+`credentials` item, changing each one that exists. A
+blocked or canceled explicit migration keeps the exact account in its recovery
+hint; it never falls back to a default-account login. A
+Darwin build with `CGO_ENABLED=0` is environment-only and returns a typed
+authentication failure explaining that the native store is unavailable when
+stored credentials are requested.
+
+Linux and Windows continue to use `go-keyring` with their native credential
+stores. This change narrows the macOS implementation boundary; it does not
+sandbox the process. Another process already running as the same local user is
+outside the threat model. Credential exposure to a different local OS user at
+ordinary permissions remains in scope.
 
 ## Handling
 
@@ -48,5 +85,5 @@ a keychain cannot be enumerated, which is the sole reason that file exists.
 
 Any change touching `internal/auth`, request construction in `internal/trello`,
 logging, or error formatting needs an explicit check that no code path can emit
-a token. Grep the diff for `token`, `key`, `Authorization`, and `%v` on a
-request or URL value.
+a token. Grep the diff for `token`, `key`, `Authorization`, `security`,
+`os/exec`, and `%v` on a request or URL value.

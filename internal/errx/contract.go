@@ -36,7 +36,8 @@ const (
 	// CodeAmbiguous signals that several objects matched. The envelope carries
 	// candidates.
 	CodeAmbiguous Code = 4
-	// CodeAuth signals missing or rejected credentials.
+	// CodeAuth signals that credentials need user action. Error.Hint identifies
+	// whether to log in, migrate keychain access, or retry authorization.
 	CodeAuth Code = 5
 	// CodeRetryable signals a rate limit or transport failure.
 	CodeRetryable Code = 6
@@ -61,7 +62,7 @@ var codes = []CodeInfo{
 	{CodeUsage, "USAGE", "usage or validation error", "fix the flags"},
 	{CodeNotFound, "NOT_FOUND", "nothing matched", "check the name; see did_you_mean"},
 	{CodeAmbiguous, "AMBIGUOUS", "several objects matched", "pick from candidates"},
-	{CodeAuth, "AUTH", "missing or rejected credentials", "re-authenticate"},
+	{CodeAuth, "AUTH", "credentials need user action", "follow the hint"},
 	{CodeRetryable, "RETRYABLE", "rate limited or network failure", "back off and retry"},
 	{CodeConfirm, "CONFIRMATION_REQUIRED", "destructive operation not confirmed", "add --yes"},
 }

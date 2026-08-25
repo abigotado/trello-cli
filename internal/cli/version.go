@@ -16,16 +16,19 @@ import (
 // with parentheses in it; the contract reports a plain token instead.
 const devVersion = "devel"
 
+// releaseVersion identifies a source distribution independently of incidental
+// VCS module stamping. Release builds may replace it with -X; ordinary builds
+// keep devVersion and use the module version embedded by the Go toolchain.
+var releaseVersion = devVersion
+
 func (a *App) newVersionCommand() *cobra.Command {
 	return a.newCommand(
 		&cobra.Command{
 			Use:   "version",
 			Short: "Print the build this binary was produced from",
 			Long: "Print the version, commit, and toolchain of this binary.\n\n" +
-				"Everything here is read from the build information the Go toolchain\n" +
-				"embeds. There are no ldflags: a value injected at link time would\n" +
-				"only ever reach a binary the release pipeline built, never one a\n" +
-				"user installed with 'go install'.\n\n" +
+				"A source distribution may provide its release version at link time.\n" +
+				"Other builds use the module version embedded by the Go toolchain.\n\n" +
 				"The version is always reported. Commit and commitTime are empty\n" +
 				"for a 'go install' build, which compiles the module zip the proxy\n" +
 				"serves and so has no VCS history to read; quote the version when\n" +
@@ -38,7 +41,7 @@ func (a *App) newVersionCommand() *cobra.Command {
 			Args: cobra.NoArgs,
 		},
 		func(_ context.Context, _ *cobra.Command, _ []string) error {
-			return a.out.Success(buildVersion(debug.ReadBuildInfo))
+			return a.out.Success(buildVersion(debug.ReadBuildInfo, releaseVersion))
 		},
 	)
 }
@@ -47,9 +50,14 @@ func (a *App) newVersionCommand() *cobra.Command {
 //
 // read is a parameter so a test can supply build information rather than
 // depending on how the test binary itself happened to be built.
-func buildVersion(read func() (*debug.BuildInfo, bool)) versionView {
+func buildVersion(read func() (*debug.BuildInfo, bool), fallback string) versionView {
+	version := fallback
+	if version == "" {
+		version = devVersion
+	}
+	releaseVersionProvided := version != devVersion
 	view := versionView{
-		Version: devVersion,
+		Version: version,
 		Go:      runtime.Version(),
 		OS:      runtime.GOOS,
 		Arch:    runtime.GOARCH,
@@ -61,7 +69,7 @@ func buildVersion(read func() (*debug.BuildInfo, bool)) versionView {
 	if info.GoVersion != "" {
 		view.Go = info.GoVersion
 	}
-	if v := info.Main.Version; v != "" && v != "(devel)" {
+	if v := info.Main.Version; !releaseVersionProvided && v != "" && v != "(devel)" {
 		view.Version = v
 	}
 	for _, setting := range info.Settings {

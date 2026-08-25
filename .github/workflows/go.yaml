@@ -1,5 +1,8 @@
 name: go
 
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -14,8 +17,12 @@ on:
 
 jobs:
   test:
-    name: Build and test
-    runs-on: ubuntu-latest
+    name: Build and test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15]
+    runs-on: ${{ matrix.os }}
     steps:
       - name: Git Checkout
         uses: actions/checkout@v7
@@ -41,6 +48,128 @@ jobs:
       - name: go build
         run: go build ./...
 
+      # The ordinary macOS build must select the cgo/Security.framework store,
+      # while disabling cgo must still leave a usable environment-only binary.
+      # Building both catches a missing SDK link or build-tag gap before the
+      # release runner reaches the same code paths.
+      - name: Darwin credential backend build modes
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          CGO_ENABLED=1 go build -o "${RUNNER_TEMP}/trello-cli-native" ./cmd/trello-cli
+          CGO_ENABLED=1 go list -f '{{join .CgoFiles "\n"}}' ./internal/auth \
+            | grep -Fxq 'keychain_darwin.go'
+          otool -L "${RUNNER_TEMP}/trello-cli-native" | grep -Fq '/Security.framework/'
+          if grep -aFq '/usr/bin/security' "${RUNNER_TEMP}/trello-cli-native"; then
+            echo "::error::native Darwin binary contains the forbidden security subprocess path"
+            exit 1
+          fi
+          CGO_ENABLED=0 go build -o "${RUNNER_TEMP}/trello-cli-env-only" ./cmd/trello-cli
+          CGO_ENABLED=0 go list -f '{{join .GoFiles "\n"}}' ./internal/auth \
+            | grep -Fxq 'keychain_darwin_nocgo.go'
+
+      # The CGO-disabled Darwin binary is intentionally environment-only. Run
+      # the whole suite in that mode so no package can accidentally retain a
+      # compile-time dependency on Security.framework or a stored credential.
+      - name: Darwin environment-only tests
+        if: runner.os == 'macOS'
+        env:
+          CGO_ENABLED: 0
+        run: go test ./...
+
+      # This is the only test allowed to exercise Security.framework against a
+      # keychain. It never opens the user's default keychain: helper A creates
+      # isolated search Keychain A and add-target Keychain B at exact temporary
+      # paths. The separately linked helper B explicitly unlocks both before it
+      # verifies cross-binary access, already-compatible idempotent migration,
+      # and update-first behavior. Creator-only ACL mutation may prompt and is
+      # intentionally outside this headless check. The default keychain and
+      # search list never move.
+      - name: Cross-binary disposable Keychain
+        if: runner.os == 'macOS'
+        timeout-minutes: 5
+        env:
+          CGO_ENABLED: 1
+        run: |
+          set -euo pipefail
+          integration_dir=$(mktemp -d "${RUNNER_TEMP}/trello-cli-keychain.XXXXXX")
+          keychain_path="${integration_dir}/integration.keychain-db"
+          add_keychain_path="${keychain_path}.add-target"
+          helper_a="${integration_dir}/helper-a"
+          helper_b="${integration_dir}/helper-b"
+          stdout_capture="${integration_dir}/stdout"
+          stderr_capture="${integration_dir}/stderr"
+
+          cleanup() {
+            original_status=$?
+            trap - EXIT INT TERM
+            set +e
+            cleanup_failed=0
+            if [ -x "${helper_b}" ]; then
+              if ! run_silent "helper B cleanup" "${helper_b}" delete "${keychain_path}"; then
+                cleanup_failed=1
+                echo "::error::disposable Keychain cleanup failed"
+              fi
+            fi
+            # The path is inside the directory created above and can contain
+            # only this test's synthetic keychain and capture files. Removing
+            # it is the final cleanup rail if SecKeychainDelete failed.
+            rm -f -- "${keychain_path}" "${add_keychain_path}" "${helper_a}" "${helper_b}" \
+              "${stdout_capture}" "${stderr_capture}"
+            if ! rmdir -- "${integration_dir}"; then
+              cleanup_failed=1
+              echo "::error::disposable Keychain directory cleanup failed"
+            fi
+            if [ "${original_status}" -ne 0 ]; then
+              exit "${original_status}"
+            fi
+            exit "${cleanup_failed}"
+          }
+          trap cleanup EXIT
+          trap 'exit 130' INT
+          trap 'exit 143' TERM
+
+          run_silent() {
+            label=$1
+            shift
+            : > "${stdout_capture}"
+            : > "${stderr_capture}"
+            echo "::notice::${label} started"
+            if ! python3 - "${stdout_capture}" "${stderr_capture}" "$@" <<'PY'
+          import subprocess
+          import sys
+
+          stdout_path, stderr_path, *command = sys.argv[1:]
+          try:
+              with open(stdout_path, "wb") as stdout, open(stderr_path, "wb") as stderr:
+                  completed = subprocess.run(command, stdout=stdout, stderr=stderr, timeout=45, check=False)
+          except subprocess.TimeoutExpired:
+              raise SystemExit(124)
+          raise SystemExit(completed.returncode)
+          PY
+            then
+              echo "::error::${label} failed"
+              return 1
+            fi
+            if [ -s "${stdout_capture}" ] || [ -s "${stderr_capture}" ]; then
+              echo "::error::${label} emitted unexpected output"
+              return 1
+            fi
+            echo "::notice::${label} completed"
+          }
+
+          go build -tags keychainintegration -ldflags '-X main.helperIdentity=A' \
+            -o "${helper_a}" ./internal/auth/keychainintegration/cmd/keychain-helper
+          go build -tags keychainintegration -ldflags '-X main.helperIdentity=B' \
+            -o "${helper_b}" ./internal/auth/keychainintegration/cmd/keychain-helper
+          if cmp -s "${helper_a}" "${helper_b}"; then
+            echo "::error::cross-binary helpers are not distinct"
+            exit 1
+          fi
+          run_silent "helper A create" "${helper_a}" create "${keychain_path}"
+          run_silent "helper B verify" "${helper_b}" verify "${keychain_path}"
+          run_silent "helper B delete" "${helper_b}" delete "${keychain_path}"
+
       # -race is not optional here: the client paces and retries from shared
       # state, and a data race there would surface as a wrong rate-limit
       # decision rather than a crash.
@@ -56,26 +185,23 @@ jobs:
       # against this module's 1.24.1. Scoped to this step so the steps above
       # stay on the go.mod version.
       - name: goreleaser check
+        if: runner.os == 'Linux'
         env:
           GOTOOLCHAIN: auto
         run: |
           go install github.com/goreleaser/goreleaser/v2@v2.17.1
           goreleaser check
 
-      # Everything above this line checks Go. The release path is mostly shell
-      # living in workflow files — release.yaml decides whether the cask may
-      # move, cask.yaml verifies and pushes it — and nothing was checking any of
-      # it. actionlint validates the workflow expressions and hands every `run:`
-      # block to shellcheck, which is what catches an unquoted expansion, a
-      # pipeline whose failure is swallowed, or a context that does not exist in
-      # a step `if:`. Those are the mistakes that only show up during a release,
-      # against a tag that is already public and immutable.
+      # Everything above this line checks Go. actionlint validates workflow
+      # expressions and hands every `run:` block to shellcheck, which catches
+      # release-script defects before they reach an immutable tag.
       #
       # Pinned rather than @latest: a lint gate that changes what it rejects on
       # its own schedule turns an unrelated pull request red. No GOTOOLCHAIN
       # here, unlike goreleaser above — actionlint declares go 1.18, so the
       # go.mod toolchain builds it.
       - name: actionlint
+        if: runner.os == 'Linux'
         run: |
           set -euo pipefail
           # actionlint falls back to workflow-syntax-only when shellcheck is
@@ -92,6 +218,7 @@ jobs:
       # The generated contract is what agents read. If regenerating changes it,
       # the committed copy no longer matches internal/errx.
       - name: Generated contract is current
+        if: runner.os == 'Linux'
         run: |
           go generate ./...
           DIRTY=$(git status --porcelain)
@@ -99,5 +226,77 @@ jobs:
             echo "::error::go generate changed tracked files; commit the result:"
             echo "$DIRTY"
             git diff
+            exit 1
+          fi
+
+      # Rehearse the portable release graph and prove it cannot grow a Darwin or
+      # Homebrew artifact accidentally. macOS is built locally from source so a
+      # downloaded unsigned executable never enters the supported install path.
+      - name: Rehearse release packaging
+        if: runner.os == 'Linux'
+        env:
+          GOTOOLCHAIN: auto
+        run: |
+          set -euo pipefail
+          ruby .github/scripts/verify-portable-release-policy_test.rb
+          ruby .github/scripts/verify-portable-release-policy.rb .goreleaser.yaml
+          goreleaser release --snapshot --clean
+          version=$(jq -r '.version' dist/metadata.json)
+          if [ -z "${version}" ] || [ "${version}" = "null" ]; then
+            echo "::error::snapshot metadata carries no version"
+            exit 1
+          fi
+
+          for artifact in \
+            "dist/trello-cli_${version}_linux_amd64.tar.gz" \
+            "dist/trello-cli_${version}_linux_arm64.tar.gz" \
+            "dist/trello-cli_${version}_windows_amd64.zip" \
+            "dist/trello-cli_${version}_windows_arm64.zip" \
+            "dist/trello-cli_${version}_checksums.txt"; do
+            if [ ! -f "${artifact}" ]; then
+              echo "::error::snapshot is missing ${artifact}"
+              exit 1
+            fi
+          done
+
+          if find dist -type f \( -iname '*darwin*' -o -name '*.rb' \) -print -quit | grep -q .; then
+            echo "::error::snapshot generated a forbidden Darwin or Homebrew artifact"
+            exit 1
+          fi
+
+          smoke_dir="${RUNNER_TEMP}/trello-cli-release-smoke"
+          mkdir -p "${smoke_dir}"
+          tar -xzf "dist/trello-cli_${version}_linux_amd64.tar.gz" -C "${smoke_dir}"
+          response=$("${smoke_dir}/trello-cli" version -o json)
+          got=$(jq -r '.data.version' <<<"${response}")
+          if [ "${got}" != "v${version}" ]; then
+            echo "::error::snapshot binary reports '${got}', expected 'v${version}'"
+            exit 1
+          fi
+          commit=$(jq -r '.data.commit' <<<"${response}")
+          expected_commit=$(git rev-parse HEAD)
+          commit_time=$(jq -r '.data.commitTime' <<<"${response}")
+          if [ "${commit}" != "${expected_commit}" ] || [ -z "${commit_time}" ]; then
+            echo "::error::snapshot binary does not report its source commit provenance"
+            exit 1
+          fi
+
+          find dist -depth -delete
+
+  # Branch protection consumes this stable check name. Keep the OS-specific
+  # matrix names for diagnosis, then collapse their aggregate result here so a
+  # failed, cancelled, or skipped matrix cannot leave a required check green.
+  required:
+    name: Build and test
+    if: ${{ always() }}
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify build matrix
+        env:
+          MATRIX_RESULT: ${{ needs.test.result }}
+        run: |
+          if [ "${MATRIX_RESULT}" != "success" ]; then
+            echo "::error::build matrix completed with ${MATRIX_RESULT}"
             exit 1
           fi

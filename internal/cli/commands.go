@@ -68,6 +68,7 @@ func (a *App) newAuthCommand() *cobra.Command {
 	}
 	cmd.AddCommand(
 		a.newAuthLoginCommand(),
+		a.newAuthMigrateKeychainCommand(),
 		a.newAuthStatusCommand(),
 		a.newAuthListCommand(),
 		a.newAuthDefaultCommand(),
@@ -75,6 +76,47 @@ func (a *App) newAuthCommand() *cobra.Command {
 		a.newAuthLogoutCommand(),
 	)
 	return cmd
+}
+
+func (a *App) newAuthMigrateKeychainCommand() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "migrate-keychain",
+		Short: "Make an existing macOS Keychain entry usable across CLI rebuilds",
+		Long: "Make an existing macOS Keychain entry usable across CLI rebuilds.\n\n" +
+			"This changes only the access policy of the exact entry for --account; it\n" +
+			"never reads or rewrites the stored API key or token. For the default\n" +
+			"account, the compatible legacy entry is migrated too when present. macOS\n" +
+			"may request authorization once per affected older item. Re-running this\n" +
+			"command after migration is safe and reports the same compatible state.",
+		Args: cobra.NoArgs,
+		Annotations: map[string]string{
+			annotationMutates: "true",
+		},
+	}
+	return a.newCommand(cmd, func(ctx context.Context, _ *cobra.Command, _ []string) error {
+		name, err := a.targetAccount()
+		if err != nil {
+			return err
+		}
+		if a.dryRun {
+			return a.plan("auth migrate-keychain", map[string]string{"account": name}, nil)
+		}
+		migrationStore, ok := a.store.(auth.MigrationStore)
+		if !ok {
+			return errx.Auth(
+				"KEYRING_MIGRATION_UNAVAILABLE",
+				"keychain access migration is unavailable for account %q",
+				name,
+			).WithHint("run 'trello-cli auth login --account %s'", name)
+		}
+		if err := migrationStore.MigrateKeychain(ctx, name); err != nil {
+			return err
+		}
+		return a.out.Success(keychainMigrationView{
+			Account:        name,
+			KeychainAccess: "compatible",
+		})
+	})
 }
 
 // targetAccount returns the account a management command should act on.
@@ -162,8 +204,14 @@ func (a *App) newAuthLoginCommand() *cobra.Command {
 			// stdout from a credential write that actually happened.
 			return a.plan("auth login", map[string]string{"account": name}, nil)
 		}
-		if err := a.store.Save(ctx, name, creds); err != nil {
-			return err
+		var saveErr error
+		if loginStore, ok := a.store.(auth.LoginStore); ok {
+			saveErr = loginStore.SaveForLogin(ctx, name, creds)
+		} else {
+			saveErr = a.store.Save(ctx, name, creds)
+		}
+		if saveErr != nil {
+			return saveErr
 		}
 		// Registered after the credential lands, so a failed write never
 		// leaves a name pointing at nothing.
@@ -214,8 +262,8 @@ func (a *App) newAuthListCommand() *cobra.Command {
 		Long: "List the stored accounts.\n\n" +
 			"Names and the default come from the local registry, so this reads no\n" +
 			"credentials. Pass --check to also verify each account still has a usable\n" +
-			"credential — that reads the keychain once per account, which on macOS can\n" +
-			"raise one access prompt per account for an unsigned binary.",
+			"credential — that reads the keychain once per account. On macOS, those\n" +
+			"queries disable authentication UI rather than opening a prompt.",
 		Args: cobra.NoArgs,
 	}
 	cmd.Flags().BoolVar(&check, "check", false, "verify each account's credential (reads the keychain per account)")
@@ -227,12 +275,16 @@ func (a *App) newAuthListCommand() *cobra.Command {
 			// Registry membership is not a guess: login registers a name only
 			// after the credential lands, and logout removes both.
 			view := accountView{Account: name, Credential: CredentialStored, Default: a.registry.Default() == name}
-			// Deliberately not read by default. Loading every account meant one
-			// keychain access per account, and on macOS an unsigned binary
-			// raises a modal prompt for each — so an agent calling this to
-			// discover accounts would hang on the first invisible dialog.
+			// Deliberately not read by default. The registry already answers the
+			// listing question; loading every credential would add one protected
+			// keychain operation per account without making the name list more
+			// accurate.
 			if check {
-				if creds, err := a.store.Load(ctx, name); err == nil && creds.Valid() {
+				creds, err := a.store.Load(ctx, name)
+				if err != nil {
+					return err
+				}
+				if creds.Valid() {
 					view.Credential = CredentialPresent
 					view.Source = auth.SourceKeyring
 					view.APIKeySuffix = keySuffix(creds.APIKey)
