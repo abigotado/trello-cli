@@ -146,6 +146,9 @@ const (
 	goKeyringHexPrefix    = "go-keyring-encoded:"
 	goKeyringBase64Prefix = "go-keyring-base64:"
 	maxKeychainItemBytes  = 64 * 1024
+	// cgo exposes Security.framework reference typedefs as integer-sized
+	// opaque handles on Darwin. Their Go null sentinel is zero, not nil.
+	nullSecurityRef = 0
 
 	keychainStatusSuccess       int64  = int64(C.errSecSuccess)
 	keychainStatusDuplicateItem int64  = int64(C.errSecDuplicateItem)
@@ -220,7 +223,7 @@ func (backend securityFrameworkBackend) get(ctx context.Context, service, accoun
 		releaseCFType(result)
 		return "", translateKeychainStatus("read", int64(status))
 	}
-	if result == 0 {
+	if result == nullSecurityRef {
 		return "", internalKeychainError("read")
 	}
 	defer C.CFRelease(result)
@@ -356,7 +359,7 @@ func (backend securityFrameworkBackend) migrate(ctx context.Context, service, pr
 	defer releaseLegacy()
 
 	var migrateLegacy migrateKeychainItem
-	if legacyRef != 0 {
+	if legacyRef != nullSecurityRef {
 		migrateLegacy = func() (bool, error) {
 			return backend.migrateExactItem(ctx, serviceRef, legacyRef)
 		}
@@ -409,7 +412,7 @@ func makeKeychainWriteRefs(service, account, value string) (keychainWriteRefs, f
 		return keychainWriteRefs{}, func() {}, err
 	}
 	valueRef := C.CFDataCreate(C.kCFAllocatorDefault, (*C.UInt8)(unsafe.Pointer(unsafe.StringData(value))), C.CFIndex(len(value)))
-	if valueRef == 0 {
+	if valueRef == nullSecurityRef {
 		releaseAccount()
 		releaseService()
 		return keychainWriteRefs{}, func() {}, internalKeychainError("write")
@@ -424,15 +427,15 @@ func makeKeychainWriteRefs(service, account, value string) (keychainWriteRefs, f
 
 func makeCFString(value string) (C.CFStringRef, func(), error) {
 	result := C.CFStringCreateWithBytes(C.kCFAllocatorDefault, (*C.UInt8)(unsafe.Pointer(unsafe.StringData(value))), C.CFIndex(len(value)), C.kCFStringEncodingUTF8, C.false)
-	if result == 0 {
-		return 0, func() {}, internalKeychainError("allocate")
+	if result == nullSecurityRef {
+		return nullSecurityRef, func() {}, internalKeychainError("allocate")
 	}
 	return result, func() { C.CFRelease(C.CFTypeRef(result)) }, nil
 }
 
 func makeOptionalCFString(value string) (C.CFStringRef, func(), error) {
 	if value == "" {
-		return 0, func() {}, nil
+		return nullSecurityRef, func() {}, nil
 	}
 	return makeCFString(value)
 }
@@ -442,14 +445,14 @@ func makeAllowAnyAccess(description C.CFStringRef) (C.SecAccessRef, func(), erro
 	status := C.trello_keychain_create_access(description, &access)
 	if status != C.errSecSuccess {
 		releaseCFType(C.CFTypeRef(access))
-		return 0, func() {}, translateKeychainStatus("create access", int64(status))
+		return nullSecurityRef, func() {}, translateKeychainStatus("create access", int64(status))
 	}
-	if access == 0 {
-		return 0, func() {}, internalKeychainError("create access")
+	if access == nullSecurityRef {
+		return nullSecurityRef, func() {}, internalKeychainError("create access")
 	}
 	if _, err := normalizeAllowAnyAccess(access); err != nil {
 		C.CFRelease(C.CFTypeRef(access))
-		return 0, func() {}, err
+		return nullSecurityRef, func() {}, err
 	}
 	return access, func() { C.CFRelease(C.CFTypeRef(access)) }, nil
 }
@@ -468,7 +471,7 @@ func normalizeAllowAnyAccess(access C.SecAccessRef) (bool, error) {
 	if status != C.errSecSuccess {
 		return false, translateKeychainStatus("read access", int64(status))
 	}
-	flags, changed, err := normalizeAllowAnyACL(int(count), applicationList == 0, uint16(promptSelector))
+	flags, changed, err := normalizeAllowAnyACL(int(count), applicationList == nullSecurityRef, uint16(promptSelector))
 	if err != nil {
 		return false, err
 	}
@@ -495,7 +498,7 @@ func (backend securityFrameworkBackend) migrateExistingAccess(item C.SecKeychain
 		releaseCFType(C.CFTypeRef(access))
 		return translateKeychainStatus("copy access", int64(status))
 	}
-	if access == 0 {
+	if access == nullSecurityRef {
 		return internalKeychainError("copy access")
 	}
 	defer C.CFRelease(C.CFTypeRef(access))
@@ -534,11 +537,11 @@ func (backend securityFrameworkBackend) resolveItem(service, account C.CFStringR
 	status := C.trello_keychain_resolve_item(service, account, backend.searchKeychain, &result)
 	if status != C.errSecSuccess {
 		releaseCFType(result)
-		return 0, func() {}, int64(status)
+		return nullSecurityRef, func() {}, int64(status)
 	}
-	if result == 0 || C.CFGetTypeID(result) != C.SecKeychainItemGetTypeID() {
+	if result == nullSecurityRef || C.CFGetTypeID(result) != C.SecKeychainItemGetTypeID() {
 		releaseCFType(result)
-		return 0, func() {}, int64(C.errSecInternalComponent)
+		return nullSecurityRef, func() {}, int64(C.errSecInternalComponent)
 	}
 	item := C.SecKeychainItemRef(result)
 	return item, func() { C.CFRelease(result) }, keychainStatusSuccess
@@ -569,7 +572,7 @@ func deleteResolvedKeychainItem[T any](resolve resolveKeychainItem[T], deleteIte
 
 func (backend securityFrameworkBackend) itemExists(service, account C.CFStringRef) (bool, error) {
 	item, releaseItem, status := backend.resolveItem(service, account)
-	if item != 0 {
+	if item != nullSecurityRef {
 		releaseItem()
 	}
 	switch status {
@@ -590,7 +593,7 @@ func (backend securityFrameworkBackend) evaluatePresence(ctx context.Context, se
 	if err != nil {
 		return keychainItemPresence{}, err
 	}
-	if legacyAccount == 0 {
+	if legacyAccount == nullSecurityRef {
 		return keychainItemPresence{primary: primary}, nil
 	}
 	legacy, err := backend.itemExists(service, legacyAccount)
@@ -776,7 +779,7 @@ func internalKeychainError(operation string) error {
 }
 
 func releaseCFType(value C.CFTypeRef) {
-	if value != 0 {
+	if value != nullSecurityRef {
 		C.CFRelease(value)
 	}
 }

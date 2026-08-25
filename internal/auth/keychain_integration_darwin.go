@@ -458,22 +458,22 @@ func createIntegrationKeychain(path string) (C.SecKeychainRef, error) {
 		C.UInt32(len(integrationPassword)),
 		unsafe.Pointer(unsafe.StringData(integrationPassword)),
 		C.false,
-		0,
+		nullSecurityRef,
 		&keychain,
 	)
 	if status != C.errSecSuccess {
 		releaseCFType(C.CFTypeRef(keychain))
-		return 0, translateKeychainStatus("create integration keychain", int64(status))
+		return nullSecurityRef, translateKeychainStatus("create integration keychain", int64(status))
 	}
-	if keychain == 0 {
-		return 0, internalKeychainError("create integration keychain")
+	if keychain == nullSecurityRef {
+		return nullSecurityRef, internalKeychainError("create integration keychain")
 	}
 	return keychain, nil
 }
 
 func openIntegrationKeychain(path string) (C.SecKeychainRef, func(), error) {
 	if err := validateIntegrationKeychainPath(path, false); err != nil {
-		return 0, func() {}, err
+		return nullSecurityRef, func() {}, err
 	}
 	cPath := C.CString(path)
 	defer C.free(unsafe.Pointer(cPath))
@@ -481,10 +481,10 @@ func openIntegrationKeychain(path string) (C.SecKeychainRef, func(), error) {
 	status := C.SecKeychainOpen(cPath, &keychain)
 	if status != C.errSecSuccess {
 		releaseCFType(C.CFTypeRef(keychain))
-		return 0, func() {}, translateKeychainStatus("open integration keychain", int64(status))
+		return nullSecurityRef, func() {}, translateKeychainStatus("open integration keychain", int64(status))
 	}
-	if keychain == 0 {
-		return 0, func() {}, internalKeychainError("open integration keychain")
+	if keychain == nullSecurityRef {
+		return nullSecurityRef, func() {}, internalKeychainError("open integration keychain")
 	}
 	return keychain, func() { C.CFRelease(C.CFTypeRef(keychain)) }, nil
 }
