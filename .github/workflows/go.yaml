@@ -135,7 +135,20 @@ jobs:
             shift
             : > "${stdout_capture}"
             : > "${stderr_capture}"
-            if ! "$@" > "${stdout_capture}" 2> "${stderr_capture}"; then
+            echo "::notice::${label} started"
+            if ! python3 - "${stdout_capture}" "${stderr_capture}" "$@" <<'PY'
+          import subprocess
+          import sys
+
+          stdout_path, stderr_path, *command = sys.argv[1:]
+          try:
+              with open(stdout_path, "wb") as stdout, open(stderr_path, "wb") as stderr:
+                  completed = subprocess.run(command, stdout=stdout, stderr=stderr, timeout=45, check=False)
+          except subprocess.TimeoutExpired:
+              raise SystemExit(124)
+          raise SystemExit(completed.returncode)
+          PY
+            then
               echo "::error::${label} failed"
               return 1
             fi
@@ -143,6 +156,7 @@ jobs:
               echo "::error::${label} emitted unexpected output"
               return 1
             fi
+            echo "::notice::${label} completed"
           }
 
           go build -tags keychainintegration -ldflags '-X main.helperIdentity=A' \
