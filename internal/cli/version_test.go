@@ -10,7 +10,7 @@ import (
 	"testing"
 )
 
-func TestBuildVersionUsesReleaseFallbackOnlyWithoutModuleVersion(t *testing.T) {
+func TestBuildVersionSelectsExplicitReleaseOrModuleVersion(t *testing.T) {
 	tests := []struct {
 		name     string
 		fallback string
@@ -38,8 +38,8 @@ func TestBuildVersionUsesReleaseFallbackOnlyWithoutModuleVersion(t *testing.T) {
 			want:     versionView{Version: "v9.8.7"},
 		},
 		{
-			name:     "module version overrides release fallback",
-			fallback: "v9.8.7",
+			name:     "module version is used without a release fallback",
+			fallback: devVersion,
 			info: &debug.BuildInfo{
 				Main: debug.Module{Version: "v1.2.3"},
 				Settings: []debug.BuildSetting{
@@ -50,6 +50,23 @@ func TestBuildVersionUsesReleaseFallbackOnlyWithoutModuleVersion(t *testing.T) {
 			ok: true,
 			want: versionView{
 				Version:    "v1.2.3",
+				Commit:     "abc123",
+				CommitTime: "2026-08-25T00:00:00Z",
+			},
+		},
+		{
+			name:     "release fallback overrides an incidental module version",
+			fallback: "v9.8.7",
+			info: &debug.BuildInfo{
+				Main: debug.Module{Version: "v0.0.0-20260825140502-4aa83da1fc2a"},
+				Settings: []debug.BuildSetting{
+					{Key: "vcs.revision", Value: "abc123"},
+					{Key: "vcs.time", Value: "2026-08-25T00:00:00Z"},
+				},
+			},
+			ok: true,
+			want: versionView{
+				Version:    "v9.8.7",
 				Commit:     "abc123",
 				CommitTime: "2026-08-25T00:00:00Z",
 			},

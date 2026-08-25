@@ -71,17 +71,25 @@ jobs:
         run: go test -race ./...
 
       # Exercise the same fallback seam used by GoReleaser and the future
-      # source-building Homebrew Formula. The normal module version, when one
-      # is embedded, still takes precedence inside the command.
+      # source-building Homebrew Formula. Ordinary builds use their embedded
+      # module version; an explicit source-distribution version wins here.
       - name: Assert the binary reports the tag
         run: |
           set -euo pipefail
           go build -trimpath \
             -ldflags "-X github.com/abigotado/trello-cli/internal/cli.releaseVersion=${RELEASE_TAG}" \
             -o "${RUNNER_TEMP}/trello-cli" ./cmd/trello-cli
-          got=$("${RUNNER_TEMP}/trello-cli" version -o json | jq -r '.data.version')
+          response=$("${RUNNER_TEMP}/trello-cli" version -o json)
+          got=$(jq -r '.data.version' <<<"${response}")
           if [ "${got}" != "${RELEASE_TAG}" ]; then
             echo "::error::binary reports version '${got}', expected '${RELEASE_TAG}'"
+            exit 1
+          fi
+          commit=$(jq -r '.data.commit' <<<"${response}")
+          expected_commit=$(git rev-parse HEAD)
+          commit_time=$(jq -r '.data.commitTime' <<<"${response}")
+          if [ "${commit}" != "${expected_commit}" ] || [ -z "${commit_time}" ]; then
+            echo "::error::binary does not report the tagged commit provenance"
             exit 1
           fi
           echo "version stamp ok: ${got}"

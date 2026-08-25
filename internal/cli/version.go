@@ -16,9 +16,9 @@ import (
 // with parentheses in it; the contract reports a plain token instead.
 const devVersion = "devel"
 
-// releaseVersion is a fallback for source distributions whose build metadata
-// cannot carry a module version. Release builds may replace it with -X; a
-// module version embedded by the Go toolchain always takes precedence.
+// releaseVersion identifies a source distribution independently of incidental
+// VCS module stamping. Release builds may replace it with -X; ordinary builds
+// keep devVersion and use the module version embedded by the Go toolchain.
 var releaseVersion = devVersion
 
 func (a *App) newVersionCommand() *cobra.Command {
@@ -27,9 +27,8 @@ func (a *App) newVersionCommand() *cobra.Command {
 			Use:   "version",
 			Short: "Print the build this binary was produced from",
 			Long: "Print the version, commit, and toolchain of this binary.\n\n" +
-				"The module version embedded by the Go toolchain is preferred. For a\n" +
-				"source distribution, where that version is unavailable, the release\n" +
-				"pipeline may provide the version at link time.\n\n" +
+				"A source distribution may provide its release version at link time.\n" +
+				"Other builds use the module version embedded by the Go toolchain.\n\n" +
 				"The version is always reported. Commit and commitTime are empty\n" +
 				"for a 'go install' build, which compiles the module zip the proxy\n" +
 				"serves and so has no VCS history to read; quote the version when\n" +
@@ -56,6 +55,7 @@ func buildVersion(read func() (*debug.BuildInfo, bool), fallback string) version
 	if version == "" {
 		version = devVersion
 	}
+	releaseVersionProvided := version != devVersion
 	view := versionView{
 		Version: version,
 		Go:      runtime.Version(),
@@ -69,7 +69,7 @@ func buildVersion(read func() (*debug.BuildInfo, bool), fallback string) version
 	if info.GoVersion != "" {
 		view.Go = info.GoVersion
 	}
-	if v := info.Main.Version; v != "" && v != "(devel)" {
+	if v := info.Main.Version; !releaseVersionProvided && v != "" && v != "(devel)" {
 		view.Version = v
 	}
 	for _, setting := range info.Settings {

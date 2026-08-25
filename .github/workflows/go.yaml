@@ -254,9 +254,17 @@ jobs:
           smoke_dir="${RUNNER_TEMP}/trello-cli-release-smoke"
           mkdir -p "${smoke_dir}"
           tar -xzf "dist/trello-cli_${version}_linux_amd64.tar.gz" -C "${smoke_dir}"
-          got=$("${smoke_dir}/trello-cli" version -o json | jq -r '.data.version')
+          response=$("${smoke_dir}/trello-cli" version -o json)
+          got=$(jq -r '.data.version' <<<"${response}")
           if [ "${got}" != "v${version}" ]; then
             echo "::error::snapshot binary reports '${got}', expected 'v${version}'"
+            exit 1
+          fi
+          commit=$(jq -r '.data.commit' <<<"${response}")
+          expected_commit=$(git rev-parse HEAD)
+          commit_time=$(jq -r '.data.commitTime' <<<"${response}")
+          if [ "${commit}" != "${expected_commit}" ] || [ -z "${commit_time}" ]; then
+            echo "::error::snapshot binary does not report its source commit provenance"
             exit 1
           fi
 
