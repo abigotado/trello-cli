@@ -280,7 +280,11 @@ func (a *App) newAuthListCommand() *cobra.Command {
 			// keychain operation per account without making the name list more
 			// accurate.
 			if check {
-				if creds, err := a.store.Load(ctx, name); err == nil && creds.Valid() {
+				creds, err := a.store.Load(ctx, name)
+				if err != nil {
+					return err
+				}
+				if creds.Valid() {
 					view.Credential = CredentialPresent
 					view.Source = auth.SourceKeyring
 					view.APIKeySuffix = keySuffix(creds.APIKey)

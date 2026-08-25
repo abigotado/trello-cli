@@ -4,10 +4,7 @@ package auth
 
 import (
 	"context"
-	"errors"
 )
-
-var errKeyringUnsupported = errors.New("native keychain backend requires cgo on macOS")
 
 type unsupportedKeyringBackend struct{}
 
@@ -37,7 +34,7 @@ func (unsupportedKeyringBackend) migrate(ctx context.Context, _, _, _ string) er
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	return errKeyringMigrationUnsupported
+	return errKeyringUnsupported
 }
 
 func (unsupportedKeyringBackend) delete(ctx context.Context, _, _ string) error {

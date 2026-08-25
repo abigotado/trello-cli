@@ -37,6 +37,7 @@ type harness struct {
 
 type fakeStore struct {
 	creds          auth.Credentials
+	loadErr        error
 	deleted        bool
 	saved          *auth.Credentials
 	savedAccount   string
@@ -46,7 +47,7 @@ type fakeStore struct {
 
 func (f *fakeStore) Load(_ context.Context, account string) (auth.Credentials, error) {
 	f.loadedAccount = account
-	return f.creds, nil
+	return f.creds, f.loadErr
 }
 func (f *fakeStore) Save(_ context.Context, account string, c auth.Credentials) error {
 	f.savedAccount = account
@@ -2029,6 +2030,39 @@ func TestAuthListDoesNotReadTheKeychainByDefault(t *testing.T) {
 	}
 	if store.loadedAccount == "" {
 		t.Error("--check did not verify any account")
+	}
+}
+
+func TestAuthListCheckPropagatesKeychainMigrationGuidance(t *testing.T) {
+	store := &fakeStore{creds: auth.Credentials{APIKey: "key", Token: "token"}}
+	h := newHarness(t, nil, store)
+	if got := h.run("--account", "work", "auth", "login", "--api-key", "key", "--token", "token"); got != errx.CodeOK {
+		t.Fatalf("login exit code = %d", got)
+	}
+	store.loadErr = errx.Auth(
+		"KEYRING_MIGRATION_REQUIRED",
+		"stored keychain access for account %q requires migration",
+		"work",
+	).WithHint("run 'trello-cli auth migrate-keychain --account work'")
+
+	if got := h.run("auth", "list", "--check"); got != errx.CodeAuth {
+		t.Fatalf("exit code = %d, want %d\nstdout: %s", got, errx.CodeAuth, h.out())
+	}
+	var envelope struct {
+		OK    bool `json:"ok"`
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+		Hint string `json:"hint"`
+	}
+	if err := json.Unmarshal([]byte(h.out()), &envelope); err != nil {
+		t.Fatalf("bad envelope: %v\n%s", err, h.out())
+	}
+	if envelope.OK || envelope.Error.Code != "KEYRING_MIGRATION_REQUIRED" {
+		t.Errorf("envelope = %+v, want migration-required error", envelope)
+	}
+	if want := "run 'trello-cli auth migrate-keychain --account work'"; envelope.Hint != want {
+		t.Errorf("hint = %q, want %q", envelope.Hint, want)
 	}
 }
 

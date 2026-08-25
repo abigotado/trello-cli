@@ -137,6 +137,7 @@ var (
 	errKeyringInteractionNotAllowed = errors.New("keyring interaction is not allowed")
 	errKeyringUserCanceled          = errors.New("keyring operation was canceled by the user")
 	errKeyringMigrationUnsupported  = errors.New("keyring access migration is unsupported")
+	errKeyringUnsupported           = errors.New("native keychain backend requires cgo on macOS")
 )
 
 func (s KeyringStore) selectedBackend() keyringBackend {
@@ -214,6 +215,9 @@ func (s KeyringStore) save(ctx context.Context, account string, creds Credential
 		if errors.Is(err, context.Canceled) {
 			return context.Canceled
 		}
+		if errors.Is(err, errKeyringUnsupported) {
+			return keyringBuildUnavailable(account, err)
+		}
 		return errx.Auth("KEYRING_UNAVAILABLE", "write keychain: %v", err).
 			WithHint("retry 'trello-cli auth login --account %s'", account).
 			Wrap(err)
@@ -249,6 +253,8 @@ func (s KeyringStore) MigrateKeychain(ctx context.Context, account string) error
 		).WithHint("run 'trello-cli auth login --account %s'", account).Wrap(err)
 	case errors.Is(err, errKeyringMigrationUnsupported):
 		return keyringMigrationUnavailable(account, err)
+	case errors.Is(err, errKeyringUnsupported):
+		return keyringMigrationBuildUnavailable(account, err)
 	case errors.Is(err, errKeyringInteractionNotAllowed):
 		return errx.Auth(
 			"KEYRING_MIGRATION_BLOCKED",
@@ -286,6 +292,9 @@ func (s KeyringStore) Delete(ctx context.Context, account string) error {
 }
 
 func keyringOperationError(operation, account string, err error) error {
+	if errors.Is(err, errKeyringUnsupported) {
+		return keyringBuildUnavailable(account, err)
+	}
 	if errors.Is(err, errKeyringInteractionNotAllowed) || errors.Is(err, errKeyringUserCanceled) {
 		return errx.Auth(
 			"KEYRING_MIGRATION_REQUIRED",
@@ -294,6 +303,22 @@ func keyringOperationError(operation, account string, err error) error {
 		).WithHint("run 'trello-cli auth migrate-keychain --account %s'", account).Wrap(err)
 	}
 	return errx.Auth("KEYRING_UNAVAILABLE", "%s keychain: %v", operation, err).Wrap(err)
+}
+
+func keyringBuildUnavailable(account string, err error) error {
+	return errx.Auth(
+		"KEYRING_UNAVAILABLE",
+		"native macOS keychain access is unavailable for account %q in this build",
+		account,
+	).WithHint("set TRELLO_API_KEY and TRELLO_TOKEN, or use a macOS build with cgo enabled").Wrap(err)
+}
+
+func keyringMigrationBuildUnavailable(account string, err error) error {
+	return errx.Auth(
+		"KEYRING_MIGRATION_UNAVAILABLE",
+		"native macOS keychain migration is unavailable for account %q in this build",
+		account,
+	).WithHint("use a macOS build with cgo enabled, or set TRELLO_API_KEY and TRELLO_TOKEN").Wrap(err)
 }
 
 func keyringMigrationUnavailable(account string, err error) error {

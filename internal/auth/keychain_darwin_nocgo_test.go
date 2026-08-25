@@ -4,8 +4,11 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
+
+	"github.com/abigotado/trello-cli/internal/errx"
 )
 
 func TestNoCGOResolverEnvironmentBypassesUnsupportedStore(t *testing.T) {
@@ -77,10 +80,19 @@ func TestNoCGOStoredOperationsReturnTypedUnavailable(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			err := tt.run(KeyringStore{})
 			wantReason := "KEYRING_UNAVAILABLE"
+			wantHint := "set TRELLO_API_KEY and TRELLO_TOKEN, or use a macOS build with cgo enabled"
 			if tt.name == "migrate" {
 				wantReason = "KEYRING_MIGRATION_UNAVAILABLE"
+				wantHint = "use a macOS build with cgo enabled, or set TRELLO_API_KEY and TRELLO_TOKEN"
 			}
 			assertAuthError(t, err, wantReason)
+			var typed *errx.Error
+			if !errors.As(err, &typed) {
+				t.Fatal("error is not an *errx.Error")
+			}
+			if typed.Hint != wantHint {
+				t.Errorf("hint = %q, want %q", typed.Hint, wantHint)
+			}
 			for _, forbidden := range []string{apiKeySentinel, tokenSentinel} {
 				if strings.Contains(err.Error(), forbidden) {
 					t.Error("stored-operation error disclosed a credential sentinel")
