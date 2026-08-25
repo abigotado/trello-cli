@@ -78,8 +78,10 @@ jobs:
       # keychain. It never opens the user's default keychain: helper A creates
       # isolated search Keychain A and add-target Keychain B at exact temporary
       # paths. The separately linked helper B explicitly unlocks both before it
-      # verifies update-first behavior. The default keychain and search list
-      # never move.
+      # verifies cross-binary access, already-compatible idempotent migration,
+      # and update-first behavior. Creator-only ACL mutation may prompt and is
+      # intentionally outside this headless check. The default keychain and
+      # search list never move.
       - name: Cross-binary disposable Keychain
         if: runner.os == 'macOS'
         timeout-minutes: 5
@@ -101,13 +103,7 @@ jobs:
             set +e
             cleanup_failed=0
             if [ -x "${helper_b}" ]; then
-              : > "${stdout_capture}"
-              : > "${stderr_capture}"
-              delete_failed=0
-              if ! "${helper_b}" delete "${keychain_path}" > "${stdout_capture}" 2> "${stderr_capture}"; then
-                delete_failed=1
-              fi
-              if [ "${delete_failed}" -ne 0 ] || [ -s "${stdout_capture}" ] || [ -s "${stderr_capture}" ]; then
+              if ! run_silent "helper B cleanup" "${helper_b}" delete "${keychain_path}"; then
                 cleanup_failed=1
                 echo "::error::disposable Keychain cleanup failed"
               fi

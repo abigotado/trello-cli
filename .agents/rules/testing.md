@@ -38,10 +38,13 @@ The sole native Keychain integration exception is a build-tagged cross-binary
 CI check. It creates two fresh disposable `SecKeychainRef` values: Keychain A
 is the explicit `kSecMatchSearchList` target containing the existing item, and
 Keychain B is the explicit `kSecUseKeychain` add target. The second binary
-unlocks both. It uses a synthetic marker, never the default keychain or user
-search list; emits no marker or credential material; and removes every item and
-both temporary Keychains on success, failure, signal, or timeout. No ordinary
-test may widen this exception.
+unlocks both and verifies cross-binary access plus idempotent migration of
+already-compatible allow-any ACLs. It deliberately does not create a
+creator-only ACL or exercise a prompt-bearing ACL mutation; pure unit tests
+cover that policy and status translation. It uses a synthetic marker, never the
+default keychain or user search list; emits no marker or credential material;
+and removes every item and both temporary Keychains on success, failure, signal,
+or timeout. No ordinary test may widen this exception.
 
 ## What must be covered
 

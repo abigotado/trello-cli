@@ -5,70 +5,6 @@ package auth
 /*
 #include <stdlib.h>
 #include <Security/Security.h>
-
-static OSStatus trello_integration_allow_any_change_acl(SecAccessRef access) {
-	CFArrayRef aclList = SecAccessCopyMatchingACLList(access, kSecACLAuthorizationChangeACL);
-	if (aclList == NULL) return errSecInternalComponent;
-	if (CFArrayGetCount(aclList) != 1) {
-		CFRelease(aclList);
-		return errSecInternalComponent;
-	}
-	SecACLRef acl = (SecACLRef)CFArrayGetValueAtIndex(aclList, 0);
-	CFArrayRef applicationList = NULL;
-	CFStringRef description = NULL;
-	SecKeychainPromptSelector promptSelector = 0;
-	OSStatus status = SecACLCopyContents(acl, &applicationList, &description, &promptSelector);
-	if (status == errSecSuccess) {
-		SecKeychainPromptSelector normalizedPromptSelector = promptSelector & ~kSecKeychainPromptRequirePassphase;
-		if (applicationList != NULL || normalizedPromptSelector != promptSelector) {
-			status = SecACLSetContents(acl, NULL, description, normalizedPromptSelector);
-		}
-	}
-	if (applicationList != NULL) CFRelease(applicationList);
-	if (description != NULL) CFRelease(description);
-	CFRelease(aclList);
-	return status;
-}
-
-static OSStatus trello_integration_add_creator_item(CFStringRef service, CFStringRef account, SecKeychainRef keychain, CFDataRef value) {
-	SecTrustedApplicationRef application = NULL;
-	OSStatus status = SecTrustedApplicationCreateFromPath(NULL, &application);
-	if (status != errSecSuccess) {
-		if (application != NULL) CFRelease(application);
-		return status;
-	}
-	const void *trustedValues[] = {application};
-	CFArrayRef trustedApplications = CFArrayCreate(kCFAllocatorDefault, trustedValues, 1, &kCFTypeArrayCallBacks);
-	CFRelease(application);
-	if (trustedApplications == NULL) return errSecAllocate;
-	SecAccessRef access = NULL;
-	status = SecAccessCreate(service, trustedApplications, &access);
-	CFRelease(trustedApplications);
-	if (status != errSecSuccess) {
-		if (access != NULL) CFRelease(access);
-		return status;
-	}
-	status = trello_integration_allow_any_change_acl(access);
-	if (status != errSecSuccess) {
-		CFRelease(access);
-		return status;
-	}
-	CFMutableDictionaryRef attributes = CFDictionaryCreateMutable(kCFAllocatorDefault, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-	if (attributes == NULL) {
-		CFRelease(access);
-		return errSecAllocate;
-	}
-	CFDictionarySetValue(attributes, kSecClass, kSecClassGenericPassword);
-	CFDictionarySetValue(attributes, kSecAttrService, service);
-	CFDictionarySetValue(attributes, kSecAttrAccount, account);
-	CFDictionarySetValue(attributes, kSecValueData, value);
-	CFDictionarySetValue(attributes, kSecUseKeychain, keychain);
-	CFDictionarySetValue(attributes, kSecAttrAccess, access);
-	status = SecItemAdd(attributes, NULL);
-	CFRelease(attributes);
-	CFRelease(access);
-	return status;
-}
 */
 import "C"
 
@@ -76,12 +12,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"unsafe"
-
-	"github.com/abigotado/trello-cli/internal/errx"
 )
 
 const (
@@ -105,10 +38,10 @@ var legacyIntegrationCredentials = Credentials{
 }
 
 // CreateIntegrationKeychain creates a disposable, isolated keychain and
-// writes only synthetic credentials through the compatible Security.framework
-// path used to exercise production migration. Decrypt access remains scoped to
-// helper A, while ChangeACL is allow-any so helper B can exercise ACL mutation
-// without UI. Real creator-scoped legacy items may prompt during migration.
+// writes only synthetic credentials through the production SaveForLogin path.
+// Both items start with an allow-any ACL so a separately linked helper can
+// exercise cross-binary access and idempotent migration without authentication
+// UI. Creator-scoped ACL mutation is intentionally not exercised in headless CI.
 func CreateIntegrationKeychain(ctx context.Context, path string) error {
 	if err := validateIntegrationKeychainPath(path, true); err != nil {
 		return err
@@ -145,23 +78,22 @@ func CreateIntegrationKeychain(ctx context.Context, path string) error {
 		return err
 	}
 	backend := securityFrameworkBackend{
-		addKeychain: searchKeychain,
+		searchKeychain: searchKeychain,
+		addKeychain:    searchKeychain,
 	}
-	items := []struct {
-		account     string
-		credentials Credentials
-	}{
-		{account: entryName(integrationAccount), credentials: integrationCredentials},
-		{account: legacyUser, credentials: legacyIntegrationCredentials},
+	store := KeyringStore{backend: backend}
+	if err := store.SaveForLogin(ctx, integrationAccount, integrationCredentials); err != nil {
+		return err
 	}
-	for _, item := range items {
-		blob, err := json.Marshal(item.credentials)
-		if err != nil {
-			return err
-		}
-		if err := addCreatorScopedIntegrationItem(ctx, backend, KeyringService, item.account, string(blob)); err != nil {
-			return err
-		}
+	legacyBlob, err := json.Marshal(legacyIntegrationCredentials)
+	if err != nil {
+		return err
+	}
+	// KeyringStore.SaveForLogin maps DefaultAccount to account:default. Call
+	// the same production backend path directly to retain the pre-accounts
+	// physical account name in this compatibility fixture.
+	if err := backend.setForLogin(ctx, KeyringService, legacyUser, "", string(legacyBlob)); err != nil {
+		return err
 	}
 	status := C.SecKeychainLock(addKeychain)
 	if status != C.errSecSuccess {
@@ -175,25 +107,9 @@ func CreateIntegrationKeychain(ctx context.Context, path string) error {
 	return nil
 }
 
-func addCreatorScopedIntegrationItem(ctx context.Context, backend securityFrameworkBackend, service, account, value string) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	encoded, err := encodeGoKeyringValue(value)
-	if err != nil {
-		return err
-	}
-	refs, release, err := makeKeychainWriteRefs(service, account, encoded)
-	if err != nil {
-		return err
-	}
-	defer release()
-	status := C.trello_integration_add_creator_item(refs.service, refs.account, backend.addKeychain, refs.value)
-	return translateKeychainStatus("write creator-scoped integration item", int64(status))
-}
-
 // VerifyIntegrationKeychain explicitly unlocks a disposable keychain and
-// verifies its synthetic credential without rendering credential material.
+// verifies cross-binary access and idempotent migration without rendering
+// credential material.
 func VerifyIntegrationKeychain(ctx context.Context, path string) error {
 	searchKeychain, releaseSearch, err := openIntegrationKeychain(path)
 	if err != nil {
@@ -223,17 +139,6 @@ func VerifyIntegrationKeychain(ctx context.Context, path string) error {
 		searchKeychain: addKeychain,
 		addKeychain:    addKeychain,
 	}}
-	_, err = store.Load(ctx, integrationAccount)
-	if err := requireIntegrationMigration(err, "named"); err != nil {
-		return err
-	}
-	_, err = store.Load(ctx, DefaultAccount)
-	if err := requireIntegrationMigration(err, "legacy default"); err != nil {
-		return err
-	}
-	if err := store.MigrateKeychain(ctx, integrationAccount); err != nil {
-		return err
-	}
 	credentials, err := store.Load(ctx, integrationAccount)
 	if err != nil {
 		return err
@@ -241,9 +146,6 @@ func VerifyIntegrationKeychain(ctx context.Context, path string) error {
 	if err := validateIntegrationCredentials(credentials); err != nil {
 		return err
 	}
-	if err := store.MigrateKeychain(ctx, DefaultAccount); err != nil {
-		return err
-	}
 	credentials, err = store.Load(ctx, DefaultAccount)
 	if err != nil {
 		return err
@@ -251,25 +153,27 @@ func VerifyIntegrationKeychain(ctx context.Context, path string) error {
 	if err := validateLegacyIntegrationCredentials(credentials); err != nil {
 		return err
 	}
-	if err := store.MigrateKeychain(ctx, DefaultAccount); err != nil {
-		return err
-	}
-	credentials, err = store.Load(ctx, DefaultAccount)
-	if err != nil {
-		return err
-	}
-	if err := validateLegacyIntegrationCredentials(credentials); err != nil {
-		return err
-	}
-	if err := store.MigrateKeychain(ctx, integrationAccount); err != nil {
-		return err
-	}
-	credentials, err = store.Load(ctx, integrationAccount)
-	if err != nil {
-		return err
-	}
-	if err := validateIntegrationCredentials(credentials); err != nil {
-		return err
+	for range 2 {
+		if err := store.MigrateKeychain(ctx, integrationAccount); err != nil {
+			return err
+		}
+		credentials, err = store.Load(ctx, integrationAccount)
+		if err != nil {
+			return err
+		}
+		if err := validateIntegrationCredentials(credentials); err != nil {
+			return err
+		}
+		if err := store.MigrateKeychain(ctx, DefaultAccount); err != nil {
+			return err
+		}
+		credentials, err = store.Load(ctx, DefaultAccount)
+		if err != nil {
+			return err
+		}
+		if err := validateLegacyIntegrationCredentials(credentials); err != nil {
+			return err
+		}
 	}
 	restoreNeeded := false
 	defer func() {
@@ -403,26 +307,6 @@ func validateLegacyIntegrationCredentials(credentials Credentials) error {
 	}
 	if credentials != legacyIntegrationCredentials {
 		return errors.New("integration keychain contains an unexpected legacy synthetic credential")
-	}
-	return nil
-}
-
-func requireIntegrationMigration(err error, kind string) error {
-	if err == nil {
-		return errors.New(kind + " creator-scoped integration item was readable before migration")
-	}
-	var typed *errx.Error
-	reason := "an untyped error"
-	typedError := errors.As(err, &typed)
-	if typedError && typed.Reason != "" {
-		reason = typed.Reason
-	}
-	if !typedError || typed.Reason != "KEYRING_MIGRATION_REQUIRED" {
-		var statusErr *keychainStatusError
-		if errors.As(err, &statusErr) {
-			return fmt.Errorf("%s creator-scoped integration item returned %s (OSStatus %d) before migration", kind, reason, statusErr.status)
-		}
-		return fmt.Errorf("%s creator-scoped integration item returned %s before migration", kind, reason)
 	}
 	return nil
 }
