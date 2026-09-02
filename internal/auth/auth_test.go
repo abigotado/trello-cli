@@ -47,12 +47,13 @@ func (f *fakeStore) Delete(_ context.Context, account string) error {
 	return f.err
 }
 
-// isolateConfigDir points os.UserConfigDir at a temp directory so no test
-// writes into the developer's real config.
+// isolateConfigDir points every os.UserConfigDir source at a temp directory:
+// AppData on Windows, HOME on Darwin, and XDG_CONFIG_HOME on Unix.
 func isolateConfigDir(t *testing.T) {
 	t.Helper()
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
+	t.Setenv("AppData", filepath.Join(dir, "appdata"))
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "xdg"))
 }
 

@@ -4,22 +4,22 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 )
 
-// isolateCacheDir points os.UserCacheDir at a temp directory.
-//
-// Both variables are set because the resolution differs by platform: darwin
-// uses $HOME/Library/Caches, and Linux uses $XDG_CACHE_HOME. Without this a
-// test would write into the developer's real cache.
+// isolateCacheDir points every os.UserCacheDir source at a temp directory:
+// LocalAppData on Windows, HOME on Darwin, and XDG_CACHE_HOME on Unix.
 func isolateCacheDir(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
+	cacheRoot := filepath.Join(dir, "cache")
 	t.Setenv("HOME", dir)
-	t.Setenv("XDG_CACHE_HOME", filepath.Join(dir, "xdg"))
+	t.Setenv("LocalAppData", cacheRoot)
+	t.Setenv("XDG_CACHE_HOME", cacheRoot)
 	return dir
 }
 
@@ -259,6 +259,9 @@ func TestNilCacheIsSafe(t *testing.T) {
 // The index maps names a caller typed to ids; it is not a secret, but it does
 // describe a workspace, so it must not be world-readable.
 func TestCacheFileIsNotWorldReadable(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("os.FileMode lacks POSIX group/other permission semantics on Windows")
+	}
 	isolateCacheDir(t)
 	c := NewCache("tok", time.Minute)
 	c.Put("boards", objects("Roadmap"), time.Now())
@@ -351,9 +354,7 @@ func modTime(t *testing.T, path string) int64 {
 // success and removed nothing, and the next lookup was still served from the
 // index the user had just asked to be rid of.
 func TestClearAllRemovesIndexesWrittenByAnyCredential(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("XDG_CACHE_HOME", dir)
-	t.Setenv("HOME", dir)
+	isolateCacheDir(t)
 
 	base, err := Dir()
 	if err != nil {

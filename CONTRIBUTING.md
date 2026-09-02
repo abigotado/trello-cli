@@ -198,7 +198,7 @@ version, or mutable URL.
 
 | Workflow | Check | Enforces |
 | --- | --- | --- |
-| `go` | Build and test | `gofmt`, `go vet`, `go build`, and `go test -race` on Linux and native macOS, plus `go test -count=1` on Windows; a macOS `CGO_ENABLED=0` suite and isolated cross-binary disposable-keychain check; Ubuntu-only `goreleaser check`, a Linux/Windows release rehearsal that rejects Darwin or Homebrew artifacts, `actionlint` with shellcheck over `.github/workflows`, and verification that `go generate` produces no diff |
+| `go` | Build and test | `gofmt`, `go vet`, `go build`, and `go test -race` on Linux and native macOS, plus `go test -count=1` on Windows; a macOS `CGO_ENABLED=0` suite and isolated cross-binary disposable-keychain check; Ubuntu-only `goreleaser check`, release rehearsal, `actionlint` with shellcheck over `.github/workflows`, and verification that `go generate` produces no diff; the rehearsal validates Linux/Windows artifacts and rejects Darwin or Homebrew artifacts |
 | `agent harness` | Harness consistency | `.claude/`/`.codex/` stay untracked, Cursor mirrors are in sync, harness unit tests pass |
 
 Both are required to merge into `main`. If you contribute from a fork, the
