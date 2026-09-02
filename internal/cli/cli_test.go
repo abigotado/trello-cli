@@ -133,11 +133,13 @@ func newHarness(t *testing.T, envs map[string]string, store auth.Store) *harness
 	if store == nil {
 		store = &fakeStore{}
 	}
-	// Redirected so the account registry never lands in the developer's real
-	// config directory.
+	// Redirect the Windows, Darwin, and Unix config/cache roots so the account
+	// registry and resolver cache never land in the developer's real profile.
 	t.Setenv("HOME", dir)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "config"))
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(dir, "cache"))
+	t.Setenv("AppData", filepath.Join(dir, "config"))
+	t.Setenv("LocalAppData", filepath.Join(dir, "cache"))
 	app := &App{
 		lookupEnv: func(k string) (string, bool) { v, ok := envs[k]; return v, ok },
 		store:     store,
